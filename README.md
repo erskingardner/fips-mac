@@ -34,6 +34,18 @@ The app never requires a package manager other than Bun. `bun.lock` is the only
 frontend lockfile. For a source-built daemon, expand **Development connection**
 in Settings or set `FIPS_MONITOR_SOCKET` before launching the app.
 
+The application icon has one editable vector source at
+`src-tauri/icons/fips-monitor-mark.svg`. Regenerate every bundled size after
+changing it with:
+
+```sh
+./scripts/generate-icons.sh
+```
+
+The script uses ImageMagick and macOS `iconutil`; it does not introduce a
+frontend package dependency. The monochrome tray variants mirror the same
+node-built F mark in Rust so health states can be drawn dynamically.
+
 Run the sibling-checkout smoke test after changing the control contract:
 
 ```sh

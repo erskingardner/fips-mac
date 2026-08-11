@@ -18,6 +18,7 @@ use tauri::{
     tray::TrayIconBuilder,
 };
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
+use tauri_plugin_clipboard_manager::ClipboardExt;
 use tokio::sync::Notify;
 
 const TRAY_ID: &str = "fips-monitor";
@@ -240,23 +241,40 @@ fn show_window(app: &AppHandle, section: &str) {
 }
 
 fn icon_for_health(health: &str) -> Image<'static> {
-    const SIZE: i32 = 18;
-    let mut pixels = vec![0_u8; (SIZE * SIZE * 4) as usize];
+    const LOGICAL_SIZE: i32 = 18;
+    const SCALE: i32 = 2;
+    const PIXEL_SIZE: i32 = LOGICAL_SIZE * SCALE;
+    let mut pixels = vec![0_u8; (PIXEL_SIZE * PIXEL_SIZE * 4) as usize];
     let mut put = |x: i32, y: i32| {
-        if (0..SIZE).contains(&x) && (0..SIZE).contains(&y) {
-            let index = ((y * SIZE + x) * 4) as usize;
-            pixels[index..index + 4].copy_from_slice(&[0, 0, 0, 255]);
+        if (0..LOGICAL_SIZE).contains(&x) && (0..LOGICAL_SIZE).contains(&y) {
+            for offset_y in 0..SCALE {
+                for offset_x in 0..SCALE {
+                    let pixel_x = x * SCALE + offset_x;
+                    let pixel_y = y * SCALE + offset_y;
+                    let index = ((pixel_y * PIXEL_SIZE + pixel_x) * 4) as usize;
+                    pixels[index..index + 4].copy_from_slice(&[0, 0, 0, 255]);
+                }
+            }
         }
     };
 
     match health {
         "healthy" => {
-            line(&mut put, 5, 5, 13, 5);
-            line(&mut put, 5, 5, 9, 13);
-            line(&mut put, 13, 5, 9, 13);
-            disc(&mut put, 5, 5, 2);
-            disc(&mut put, 13, 5, 2);
-            disc(&mut put, 9, 13, 2);
+            // A compact, network-built F: recognizable as the product mark,
+            // with only the strokes and nodes that survive at menu-bar size.
+            line(&mut put, 3, 3, 15, 3);
+            line(&mut put, 3, 3, 3, 15);
+            line(&mut put, 3, 9, 11, 9);
+            for (x, y, radius) in [
+                (3, 3, 2),
+                (9, 3, 1),
+                (15, 3, 2),
+                (3, 9, 2),
+                (11, 9, 2),
+                (3, 15, 2),
+            ] {
+                disc(&mut put, x, y, radius);
+            }
         }
         "degraded" => {
             line(&mut put, 9, 2, 2, 15);
@@ -286,7 +304,7 @@ fn icon_for_health(health: &str) -> Image<'static> {
             line(&mut put, 6, 9, 12, 9);
         }
     }
-    Image::new_owned(pixels, SIZE as u32, SIZE as u32)
+    Image::new_owned(pixels, PIXEL_SIZE as u32, PIXEL_SIZE as u32)
 }
 
 fn line(put: &mut impl FnMut(i32, i32), mut x0: i32, mut y0: i32, x1: i32, y1: i32) {
@@ -427,11 +445,35 @@ fn configure_window(window: WebviewWindow) {
     });
 }
 
+#[tauri::command]
+fn copy_node_npub(app: AppHandle) -> Result<(), String> {
+    let npub = {
+        let state = app.state::<AppState>();
+        let snapshot = state
+            .last_snapshot
+            .lock()
+            .map_err(|_| "The node status is temporarily unavailable.".to_string())?;
+        snapshot
+            .status
+            .as_ref()
+            .and_then(|status| status.get("npub"))
+            .and_then(Value::as_str)
+            .filter(|npub| !npub.is_empty())
+            .ok_or_else(|| "The FIPS node has not reported an npub yet.".to_string())?
+            .to_string()
+    };
+
+    app.clipboard()
+        .write_text(npub)
+        .map_err(|error| format!("Could not copy the node npub: {error}"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let socket_path = resolve_socket_path(None);
     let initial_snapshot = MonitorSnapshot::starting(&socket_path);
     tauri::Builder::default()
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             None,
@@ -455,6 +497,7 @@ pub fn run() {
             control::reset_config,
             control::set_socket_path,
             control::refresh_now,
+            copy_node_npub,
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
