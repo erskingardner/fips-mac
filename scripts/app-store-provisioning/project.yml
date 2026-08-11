@@ -1,0 +1,24 @@
+name: FIPSMonitorProvisioning
+
+options:
+  deploymentTarget:
+    macOS: "13.0"
+
+targets:
+  ProvisioningHelper:
+    type: application
+    platform: macOS
+    sources:
+      - ${PROVISIONING_HELPER_ROOT}/Sources
+    entitlements:
+      path: ${PROVISIONING_HELPER_ROOT}/Provisioning.entitlements
+    settings:
+      base:
+        CODE_SIGN_STYLE: Automatic
+        CURRENT_PROJECT_VERSION: 1
+        DEVELOPMENT_TEAM: 8Z6Q2LZ77W
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
+        MARKETING_VERSION: 2026.8.6
+        PRODUCT_BUNDLE_IDENTIFIER: com.paper-robin.fips-monitor
+        PRODUCT_NAME: FIPS Monitor

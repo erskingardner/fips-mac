@@ -1,0 +1,159 @@
+#!/bin/zsh
+
+set -euo pipefail
+
+project_root=${0:A:h:h}
+rustup_bin="$HOME/.cargo/bin"
+tauri_config="$project_root/src-tauri/tauri.conf.json"
+profile_path="$project_root/src-tauri/appstore/FIPSMonitor.provisionprofile"
+app_identity="Apple Distribution: PAPER ROBIN DI JEFFREY ERSKIN GARDNER & C. SAS (8Z6Q2LZ77W)"
+installer_identity="3rd Party Mac Developer Installer: PAPER ROBIN DI JEFFREY ERSKIN GARDNER & C. SAS (8Z6Q2LZ77W)"
+expected_app_id="8Z6Q2LZ77W.com.paper-robin.fips-monitor"
+expected_socket_exception="/private/var/run/fips/control.sock"
+product_name=$(jq -er '.productName' "$tauri_config")
+app_version=$(jq -er '.version' "$tauri_config")
+bundle_version=$(jq -er '.bundle.macOS.bundleVersion' "$tauri_config")
+artifact_dir="$project_root/src-tauri/target/universal-apple-darwin/release/bundle/macos"
+app_path="$artifact_dir/$product_name.app"
+pkg_path="$artifact_dir/$product_name-$app_version-$bundle_version.pkg"
+
+if [[ ! -x "$rustup_bin/cargo" || ! -x "$rustup_bin/rustc" ]]; then
+  print -u2 "The rustup-managed Cargo and Rust compiler are required in $rustup_bin."
+  exit 1
+fi
+export PATH="$rustup_bin:$PATH"
+
+if [[ ! -f "$profile_path" ]]; then
+  print -u2 "Missing App Store profile. Run: bun run tauri:profile:app-store"
+  exit 1
+fi
+
+if ! security find-identity -v -p codesigning | grep -Fq "\"$app_identity\""; then
+  print -u2 "Missing signing identity: $app_identity"
+  exit 1
+fi
+
+if ! security find-identity -v -p basic | grep -Fq "\"$installer_identity\""; then
+  print -u2 "Missing installer identity: $installer_identity"
+  exit 1
+fi
+
+profile_plist=$(security cms -D -i "$profile_path")
+profile_team=$(print -r -- "$profile_plist" | plutil -extract TeamIdentifier.0 raw -o - -)
+profile_app_id=$(print -r -- "$profile_plist" | python3 -c 'import plistlib, sys; print(plistlib.loads(sys.stdin.buffer.read())["Entitlements"]["com.apple.application-identifier"])')
+profile_expiration=$(print -r -- "$profile_plist" | plutil -extract ExpirationDate raw -o - -)
+
+if [[ "$profile_team" != "8Z6Q2LZ77W" ]]; then
+  print -u2 "Provisioning profile has unexpected team: $profile_team"
+  exit 1
+fi
+
+if [[ "$profile_app_id" != "$expected_app_id" ]]; then
+  print -u2 "Provisioning profile has unexpected application identifier: $profile_app_id"
+  exit 1
+fi
+
+if print -r -- "$profile_plist" | plutil -extract ProvisionedDevices raw -o - - >/dev/null 2>&1; then
+  print -u2 "Provisioning profile is not an App Store distribution profile."
+  exit 1
+fi
+
+if [[ -z "$profile_expiration" ]] || ! python3 -c 'from datetime import datetime, timezone; import sys; sys.exit(0 if datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00")) > datetime.now(timezone.utc) else 1)' "$profile_expiration"; then
+  print -u2 "Provisioning profile is expired or has an invalid expiration date."
+  exit 1
+fi
+
+identity_hash=$(security find-identity -v -p codesigning | awk -v identity="$app_identity" 'index($0, "\"" identity "\"") { print $2; exit }')
+profile_certificate_count=$(print -r -- "$profile_plist" | plutil -extract DeveloperCertificates raw -o - -)
+profile_contains_identity=false
+for (( index = 0; index < profile_certificate_count; index++ )); do
+  profile_certificate_hash=$(print -r -- "$profile_plist" | plutil -extract "DeveloperCertificates.$index" raw -o - - | base64 -D | openssl x509 -inform DER -noout -fingerprint -sha1 | cut -d= -f2 | tr -d ':')
+  if [[ "$profile_certificate_hash" == "$identity_hash" ]]; then
+    profile_contains_identity=true
+    break
+  fi
+done
+if [[ "$profile_contains_identity" != "true" ]]; then
+  print -u2 "Provisioning profile does not contain the installed Apple Distribution identity."
+  exit 1
+fi
+
+for target in aarch64-apple-darwin x86_64-apple-darwin; do
+  if ! rustup target list --installed | grep -Fxq "$target"; then
+    print -u2 "Missing Rust target $target. Install it with: rustup target add $target"
+    exit 1
+  fi
+done
+
+cd "$project_root"
+bun run tauri build \
+  --bundles app \
+  --target universal-apple-darwin \
+  --config src-tauri/tauri.appstore.conf.json
+
+codesign --verify --deep --strict --verbose=2 "$app_path"
+
+info_plist="$app_path/Contents/Info.plist"
+if [[ $(plutil -extract CFBundleIdentifier raw -o - "$info_plist") != "com.paper-robin.fips-monitor" ]]; then
+  print -u2 "Signed application has an unexpected bundle identifier."
+  exit 1
+fi
+if [[ $(plutil -extract CFBundleShortVersionString raw -o - "$info_plist") != "$app_version" ]]; then
+  print -u2 "Signed application has an unexpected marketing version."
+  exit 1
+fi
+if [[ $(plutil -extract CFBundleVersion raw -o - "$info_plist") != "$bundle_version" ]]; then
+  print -u2 "Signed application has an unexpected build number."
+  exit 1
+fi
+if [[ $(plutil -extract LSMinimumSystemVersion raw -o - "$info_plist") != "13.0" ]]; then
+  print -u2 "Signed application has an unexpected minimum macOS version."
+  exit 1
+fi
+if [[ $(plutil -extract ITSAppUsesNonExemptEncryption raw -o - "$info_plist") != "false" ]]; then
+  print -u2 "Signed application has an unexpected encryption declaration."
+  exit 1
+fi
+
+executable=$(plutil -extract CFBundleExecutable raw -o - "$info_plist")
+app_architectures=$(lipo -archs "$app_path/Contents/MacOS/$executable")
+if [[ "$app_architectures" != *"arm64"* || "$app_architectures" != *"x86_64"* ]]; then
+  print -u2 "Signed application is not universal: $app_architectures"
+  exit 1
+fi
+
+signed_entitlements=$(codesign -d --entitlements :- "$app_path" 2>/dev/null | plutil -convert json -o - -)
+if [[ $(print -r -- "$signed_entitlements" | jq -r '.["com.apple.security.app-sandbox"] // false') != "true" ]]; then
+  print -u2 "Signed application is missing the App Sandbox entitlement."
+  exit 1
+fi
+if [[ $(print -r -- "$signed_entitlements" | jq -r '.["com.apple.security.network.client"] // false') != "true" ]]; then
+  print -u2 "Signed application is missing the network client entitlement."
+  exit 1
+fi
+if [[ $(print -r -- "$signed_entitlements" | jq -r '.["com.apple.application-identifier"] // ""') != "$expected_app_id" ]]; then
+  print -u2 "Signed application identifier does not match the provisioning profile."
+  exit 1
+fi
+if [[ $(print -r -- "$signed_entitlements" | jq -r '.["com.apple.developer.team-identifier"] // ""') != "8Z6Q2LZ77W" ]]; then
+  print -u2 "Signed application has an unexpected team identifier."
+  exit 1
+fi
+if ! print -r -- "$signed_entitlements" | jq -e --arg path "$expected_socket_exception" '.["com.apple.security.temporary-exception.files.absolute-path.read-write"] | index($path) != null' >/dev/null; then
+  print -u2 "Signed application is missing the FIPS control-socket exception."
+  exit 1
+fi
+
+embedded_profile="$app_path/Contents/embedded.provisionprofile"
+if [[ ! -f "$embedded_profile" ]]; then
+  print -u2 "Signed application is missing its embedded provisioning profile."
+  exit 1
+fi
+
+xcrun productbuild \
+  --sign "$installer_identity" \
+  --component "$app_path" /Applications \
+  "$pkg_path"
+
+pkgutil --check-signature "$pkg_path"
+print "Created Mac App Store package: $pkg_path"
