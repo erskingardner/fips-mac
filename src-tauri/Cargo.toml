@@ -1,6 +1,6 @@
 [package]
 name = "fips-monitor"
-version = "0.1.0"
+version = "2026.8.6"
 description = "A native macOS monitor and configuration client for FIPS nodes"
 authors = ["Paper Robin"]
 edition = "2024"
