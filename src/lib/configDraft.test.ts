@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { formatDiffValue, readGuidedDraft, writeGuidedDraft } from "./configDraft";
+import {
+  formatDiffValue,
+  isLoopbackUdpBind,
+  lanDiscoveryIssue,
+  readGuidedDraft,
+  writeGuidedDraft,
+} from "./configDraft";
 
 const sample = `node:
   identity:
@@ -48,5 +54,29 @@ describe("shared configuration draft", () => {
 
   it("never exposes preserved secrets in diff labels", () => {
     expect(formatDiffValue("<redacted:preserve>")).toBe("secret preserved");
+  });
+
+  it("detects IPv4, IPv6, and hostname loopback UDP binds", () => {
+    expect(isLoopbackUdpBind("127.0.0.1:2121")).toBe(true);
+    expect(isLoopbackUdpBind("[::1]:2121")).toBe(true);
+    expect(isLoopbackUdpBind("localhost:2121")).toBe(true);
+    expect(isLoopbackUdpBind("0.0.0.0:2121")).toBe(false);
+    expect(isLoopbackUdpBind("192.168.1.10:2121")).toBe(false);
+  });
+
+  it("offers an explicit LAN-safe bind without silently changing exposure", () => {
+    const guided = readGuidedDraft(sample);
+    guided.lanDiscovery = true;
+    guided.udpBind = "127.0.0.1:4242";
+
+    expect(lanDiscoveryIssue(guided)).toEqual({
+      kind: "loopback_only",
+      message:
+        "127.0.0.1:4242 only accepts traffic from this Mac. LAN peers can see the advertisement but cannot connect.",
+      suggestedBind: "0.0.0.0:4242",
+    });
+
+    guided.udpEnabled = false;
+    expect(lanDiscoveryIssue(guided)?.kind).toBe("missing_udp");
   });
 });

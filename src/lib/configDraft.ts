@@ -35,6 +35,12 @@ export interface GuidedDraft {
   peers: GuidedPeer[];
 }
 
+export interface LanDiscoveryIssue {
+  kind: "missing_udp" | "loopback_only";
+  message: string;
+  suggestedBind: string;
+}
+
 function map(value: unknown): UnknownMap {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as UnknownMap)
@@ -171,6 +177,50 @@ export function newGuidedPeer(): GuidedPeer {
     addresses: [{ transport: "udp", addr: "", raw: {} }],
     raw: {},
   };
+}
+
+function bindHost(bind: string): string {
+  const value = bind.trim().toLowerCase();
+  const bracketed = value.match(/^\[([^\]]+)\](?::\d+)?$/);
+  if (bracketed) return bracketed[1];
+  if (value === "::1" || value === "0:0:0:0:0:0:0:1") return value;
+  const separator = value.lastIndexOf(":");
+  return separator > -1 ? value.slice(0, separator) : value;
+}
+
+function bindPort(bind: string): string {
+  const match = bind.trim().match(/:(\d+)$/);
+  return match?.[1] ?? "2121";
+}
+
+export function isLoopbackUdpBind(bind: string): boolean {
+  const host = bindHost(bind);
+  return (
+    host === "localhost" ||
+    host === "::1" ||
+    host === "0:0:0:0:0:0:0:1" ||
+    /^127(?:\.\d{1,3}){3}$/.test(host)
+  );
+}
+
+/** A pre-validation explanation for the most common broken LAN setup. */
+export function lanDiscoveryIssue(draft: GuidedDraft): LanDiscoveryIssue | null {
+  if (!draft.lanDiscovery) return null;
+  if (!draft.udpEnabled) {
+    return {
+      kind: "missing_udp",
+      message: "LAN discovery needs a UDP transport that other devices can reach.",
+      suggestedBind: "0.0.0.0:2121",
+    };
+  }
+  if (isLoopbackUdpBind(draft.udpBind)) {
+    return {
+      kind: "loopback_only",
+      message: `${draft.udpBind} only accepts traffic from this Mac. LAN peers can see the advertisement but cannot connect.`,
+      suggestedBind: `0.0.0.0:${bindPort(draft.udpBind)}`,
+    };
+  }
+  return null;
 }
 
 export function formatDiffValue(value: unknown): string {

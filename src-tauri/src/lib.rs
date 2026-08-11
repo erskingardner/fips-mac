@@ -102,6 +102,28 @@ fn classify_status(status: &Value) -> (&'static str, String) {
             format!("The node is running, but TUN is {tun_state}."),
         );
     }
+    if let Some(lan) = object.get("lan_discovery").and_then(Value::as_object)
+        && lan.get("enabled").and_then(Value::as_bool) == Some(true)
+    {
+        if let Some(warning) = lan
+            .get("warnings")
+            .and_then(Value::as_array)
+            .and_then(|warnings| warnings.first())
+            .and_then(Value::as_str)
+        {
+            return ("degraded", warning.to_string());
+        }
+        let discovery_state = lan
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        if !discovery_state.eq_ignore_ascii_case("running") {
+            return (
+                "degraded",
+                format!("LAN discovery is enabled, but its runtime is {discovery_state}."),
+            );
+        }
+    }
     ("healthy", "The FIPS node is running normally.".into())
 }
 
@@ -527,6 +549,29 @@ mod tests {
             "degraded"
         );
         assert_eq!(classify_status(&json!({"state": "Starting"})).0, "degraded");
+        assert_eq!(
+            classify_status(&json!({
+                "state": "Running",
+                "lan_discovery": {
+                    "enabled": true,
+                    "state": "running",
+                    "warnings": ["LAN discovery is loopback-only"]
+                }
+            })),
+            ("degraded", "LAN discovery is loopback-only".to_string())
+        );
+        assert_eq!(
+            classify_status(&json!({
+                "state": "Running",
+                "lan_discovery": {
+                    "enabled": true,
+                    "state": "running",
+                    "warnings": []
+                }
+            }))
+            .0,
+            "healthy"
+        );
         assert_eq!(classify_status(&Value::Null).0, "incompatible");
     }
 
