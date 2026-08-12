@@ -36,11 +36,16 @@ Tauri IPC.
 
 Access Control edits are limited to the `peers.allow` and `peers.deny` files
 reported by the daemon, and only when they are in FIPS's standard
-`/etc/fips` or `/usr/local/etc/fips` directories. The app does not elevate
-privileges. If the installed ACL files are not writable by the current user,
-the page reports the permission error and leaves the files unchanged.
+`/etc/fips` or `/usr/local/etc/fips` directories. The app does not run as root
+or retain elevated privileges. Direct-download macOS builds may show the native
+macOS administrator prompt when an ACL file is protected. If authorization is
+canceled or unavailable, the page reports the error and leaves the files unchanged.
 Mac App Store builds remain read-only for these files because the sandbox does
 not grant direct access to the system configuration directory.
+
+The app never receives the password; it writes a temporary validated draft and
+asks macOS to copy it into the one approved FIPS ACL path. App Store builds do
+not use this authorization path.
 
 The production control socket is `/var/run/fips/control.sock`. Access is still
 subject to the socket's POSIX ownership and mode; packaged FIPS installations

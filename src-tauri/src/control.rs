@@ -6,6 +6,11 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
+#[cfg(all(target_os = "macos", not(fips_monitor_app_store)))]
+use std::{
+    process::Command,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use tauri::State;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -316,17 +321,96 @@ fn write_acl_entry(path: &Path, entry: &str, remove: bool) -> Result<bool, Clien
     if !output.is_empty() && (trailing_newline || !remove) {
         output.push('\n');
     }
+    match write_acl_contents(path, &output) {
+        Ok(()) => {}
+        Err(_error) if _error.kind == "permission_denied" => {
+            #[cfg(all(target_os = "macos", not(fips_monitor_app_store)))]
+            write_acl_with_native_authorization(path, &output)?;
+            #[cfg(not(all(target_os = "macos", not(fips_monitor_app_store))))]
+            return Err(ClientError::new(
+                "authorization_unavailable",
+                "ACL editing is unavailable in this sandboxed build; use the direct-download build to edit FIPS rules",
+            ));
+        }
+        Err(error) => return Err(error),
+    }
+    Ok(true)
+}
+
+fn write_acl_contents(path: &Path, contents: &str) -> Result<(), ClientError> {
     let mut file = OpenOptions::new()
         .create(true)
         .truncate(true)
         .write(true)
         .open(path)
         .map_err(|error| acl_file_error("open", path, error))?;
-    file.write_all(output.as_bytes())
+    file.write_all(contents.as_bytes())
         .map_err(|error| acl_file_error("write", path, error))?;
     file.sync_all()
         .map_err(|error| acl_file_error("sync", path, error))?;
-    Ok(true)
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", not(fips_monitor_app_store)))]
+fn write_acl_with_native_authorization(path: &Path, contents: &str) -> Result<(), ClientError> {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary_path = std::env::temp_dir().join(format!(
+        "fips-monitor-acl-{}-{stamp}.tmp",
+        std::process::id()
+    ));
+    let result = (|| {
+        write_temporary_acl_contents(&temporary_path, contents)?;
+        let script = format!(
+            "do shell script \"/bin/cp {} {}\" with administrator privileges",
+            shell_quote(&temporary_path),
+            shell_quote(path),
+        );
+        let output = Command::new("/usr/bin/osascript")
+            .args(["-e", script.as_str()])
+            .output()
+            .map_err(|error| {
+                ClientError::new(
+                    "authorization_unavailable",
+                    format!("Could not open the macOS authorization prompt: {error}"),
+                )
+            })?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(ClientError::new(
+            "authorization_denied",
+            if detail.is_empty() {
+                "macOS authorization was cancelled or denied".into()
+            } else {
+                format!("macOS authorization was cancelled or denied: {detail}")
+            },
+        ))
+    })();
+    let _ = std::fs::remove_file(&temporary_path);
+    result
+}
+
+#[cfg(all(target_os = "macos", not(fips_monitor_app_store)))]
+fn write_temporary_acl_contents(path: &Path, contents: &str) -> Result<(), ClientError> {
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+        .map_err(|error| acl_file_error("create temporary draft", path, error))?;
+    file.write_all(contents.as_bytes())
+        .map_err(|error| acl_file_error("write temporary draft", path, error))?;
+    file.sync_all()
+        .map_err(|error| acl_file_error("sync temporary draft", path, error))?;
+    Ok(())
+}
+
+#[cfg(all(target_os = "macos", not(fips_monitor_app_store)))]
+fn shell_quote(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
 }
 
 fn acl_file_error(operation: &str, path: &Path, error: std::io::Error) -> ClientError {

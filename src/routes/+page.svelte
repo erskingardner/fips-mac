@@ -877,7 +877,7 @@
   <div class="modal-backdrop" role="presentation" onclick={(event) => event.target === event.currentTarget && (aclModal = null)}>
     <form class="modal" onsubmit={(event) => { event.preventDefault(); void addAclEntry(aclModal!); }}>
       <button type="button" class="drawer-close" onclick={() => (aclModal = null)}>×</button>
-      <span>PEER ACCESS CONTROL</span><h2>{aclModal === "allow" ? "Add to whitelist" : "Add to blocklist"}</h2><p>Use a peer npub, a configured host alias, or <code>ALL</code>. FIPS reloads the file automatically.</p>
+      <span>PEER ACCESS CONTROL</span><h2>{aclModal === "allow" ? "Add to whitelist" : "Add to blocklist"}</h2><p>Use a peer npub, a configured host alias, or <code>ALL</code>. FIPS reloads the file automatically. macOS may ask for administrator approval.</p>
       <label class="field"><span>{aclModal === "allow" ? "Allowed peer" : "Blocked peer"}</span><input required placeholder="npub1… or alias" bind:value={aclEntry}/></label>
       {#if aclError}<div class="modal-error"><strong>Rule was not saved</strong><span>{aclError}</span></div>{/if}
       <div class="modal-actions"><button type="button" onclick={() => (aclModal = null)}>Cancel</button><button class="primary" disabled={aclBusy}>{aclBusy ? "Saving…" : "Save rule"}</button></div>
