@@ -254,23 +254,14 @@ fn health_label(health: &str) -> &'static str {
 }
 
 fn show_window(app: &AppHandle, section: &str) {
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
         let _ = window.emit("app://navigate", section);
-
-        // macOS can finish dismissing the administrator dialog after the
-        // command returns. Retry after that transition so an accessory app
-        // is made key again instead of remaining behind the previously active
-        // application.
-        let focus_retry = window.clone();
-        tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(250)).await;
-            let _ = focus_retry.show();
-            let _ = focus_retry.unminimize();
-            let _ = focus_retry.set_focus();
-        });
     }
 }
 
@@ -475,11 +466,15 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 }
 
 fn configure_window(window: WebviewWindow) {
+    #[cfg(target_os = "macos")]
+    let app = window.app_handle().clone();
     let close_window = window.clone();
     window.on_window_event(move |event| {
         if let tauri::WindowEvent::CloseRequested { api, .. } = event {
             api.prevent_close();
             let _ = close_window.hide();
+            #[cfg(target_os = "macos")]
+            let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
         }
     });
 }

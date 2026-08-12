@@ -283,11 +283,6 @@
   async function restoreDashboardFocus() {
     if (!isTauri()) return;
     await invoke("focus_dashboard").catch(() => {});
-    for (const delay of [250, 750, 1500]) {
-      window.setTimeout(() => {
-        void invoke("focus_dashboard").catch(() => {});
-      }, delay);
-    }
   }
 
   async function addAclEntry(list: AclList) {
