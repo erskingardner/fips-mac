@@ -86,7 +86,7 @@ for target in aarch64-apple-darwin x86_64-apple-darwin; do
 done
 
 cd "$project_root"
-bun run tauri build \
+FIPS_MONITOR_APP_STORE=1 bun run tauri build \
   --bundles app \
   --target universal-apple-darwin \
   --config src-tauri/tauri.appstore.conf.json

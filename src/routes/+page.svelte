@@ -11,6 +11,7 @@
     type GuidedDraft,
   } from "$lib/configDraft";
   import type {
+    AclSnapshot,
     ApplyResult,
     ApplyStatus,
     ConfigSnapshot,
@@ -25,7 +26,9 @@
   import { formatFipsVersion } from "$lib/format";
   import Icon from "$lib/Icon.svelte";
 
-  type View = "overview" | "peers" | "transports" | "settings";
+  type View = "overview" | "peers" | "transports" | "access" | "settings";
+  type AclList = "allow" | "deny";
+  type AclRemoval = { list: AclList; entry: string };
   type SettingsSection = "identity" | "network" | "discovery" | "transports" | "peers";
 
   const initialSnapshot: MonitorSnapshot = {
@@ -40,6 +43,13 @@
   let activeView = $state<View>("overview");
   let peers = $state<Peer[]>([]);
   let transports = $state<Transport[]>([]);
+  let acl = $state<AclSnapshot | null>(null);
+  let aclLoading = $state(false);
+  let aclError = $state("");
+  let aclModal = $state<AclList | null>(null);
+  let aclRemoval = $state<AclRemoval | null>(null);
+  let aclEntry = $state("");
+  let aclBusy = $state(false);
   let detailLoading = $state(false);
   let detailError = $state("");
   let selectedPeer = $state<Peer | null>(null);
@@ -71,6 +81,8 @@
   );
   const guidedLanIssue = $derived(guided ? lanDiscoveryIssue(guided) : null);
   const online = $derived(snapshot.health === "healthy" || snapshot.health === "degraded");
+  const allowEntries = $derived(acl?.allow_file_entries ?? acl?.allow_entries ?? []);
+  const denyEntries = $derived(acl?.deny_file_entries ?? acl?.deny_entries ?? []);
   const healthLabel = $derived(
     snapshot.health === "permission_denied"
       ? "Permission denied"
@@ -178,6 +190,7 @@
       snapshot = await invoke<MonitorSnapshot>("get_snapshot");
       developmentPath = snapshot.socket_path;
       await loadDetails();
+      if (activeView === "access") await loadAcl(true);
       invoke("refresh_now").catch(() => {});
     } catch (error) {
       detailError = errorMessage(error);
@@ -199,7 +212,7 @@
     detailLoading = true;
     detailError = "";
     try {
-      if (activeView === "overview" || activeView === "peers") {
+      if (activeView === "overview" || activeView === "peers" || activeView === "access") {
         const result = await invoke<{ peers?: Peer[] }>("get_peers");
         peers = result.peers ?? [];
       }
@@ -214,11 +227,101 @@
     }
   }
 
+  async function loadAcl(force = false) {
+    if (!isTauri() || aclLoading || (acl && !force)) return;
+    aclLoading = true;
+    aclError = "";
+    try {
+      acl = await invoke<AclSnapshot>("get_acl");
+    } catch (error) {
+      aclError = errorMessage(error);
+    } finally {
+      aclLoading = false;
+    }
+  }
+
   async function selectView(view: View) {
     activeView = view;
     selectedPeer = null;
     if (view === "settings") await loadConfig();
+    else if (view === "access") {
+      await loadAcl(true);
+      await loadDetails();
+    }
     else await loadDetails();
+  }
+
+  function accessModeLabel(): string {
+    if (!acl) return "Unavailable";
+    if (acl.deny_all && allowEntries.length) return "Strict allowlist";
+    if (denyEntries.length) return "Denylist active";
+    if (allowEntries.length) return "Explicit allows";
+    return "Default allow";
+  }
+
+  function openAclModal(list: AclList) {
+    aclModal = list;
+    aclRemoval = null;
+    aclEntry = "";
+    aclError = "";
+  }
+
+  function requestRemoveAclEntry(list: AclList, entry: string) {
+    aclRemoval = { list, entry };
+    aclError = "";
+  }
+
+  async function refreshAclAfterChange(list: AclList, entry: string, shouldExist: boolean) {
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 350));
+      await loadAcl(true);
+      const entries = list === "allow" ? allowEntries : denyEntries;
+      if (entries.some((candidate) => candidate.toLowerCase() === entry.toLowerCase()) === shouldExist) return;
+    }
+  }
+
+  async function restoreDashboardFocus() {
+    if (!isTauri()) return;
+    await invoke("focus_dashboard").catch(() => {});
+  }
+
+  async function addAclEntry(list: AclList) {
+    const entry = aclEntry.trim();
+    if (!entry) return;
+    aclBusy = true;
+    aclError = "";
+    try {
+      const result = await invoke<{ changed?: boolean }>("add_acl_entry", { list, entry });
+      aclModal = null;
+      aclEntry = "";
+      toast = result.changed === false
+        ? `${entry} is already on the ${list}list.`
+        : `${entry} added to the ${list}list.`;
+      await refreshAclAfterChange(list, entry, true);
+      await restoreDashboardFocus();
+    } catch (error) {
+      aclError = errorMessage(error);
+      await restoreDashboardFocus();
+    } finally {
+      aclBusy = false;
+    }
+  }
+
+  async function removeAclEntry(list: AclList, entry: string) {
+    aclBusy = true;
+    aclError = "";
+    try {
+      await invoke("remove_acl_entry", { list, entry });
+      aclRemoval = null;
+      toast = `${entry} removed from the ${list}list.`;
+      await refreshAclAfterChange(list, entry, false);
+      await restoreDashboardFocus();
+    } catch (error) {
+      aclError = errorMessage(error);
+      await restoreDashboardFocus();
+    } finally {
+      aclBusy = false;
+    }
   }
 
   async function connect() {
@@ -425,10 +528,11 @@
       developmentPath = snapshot.socket_path;
       if (document.visibilityState === "visible" && activeView !== "settings" && online) {
         void loadDetails();
+        if (activeView === "access") void loadAcl(true);
       }
     }).then((unlisten) => (snapshotUnlisten = unlisten));
     void listen<string>("app://navigate", (event) => {
-      void selectView(event.payload === "settings" ? "settings" : "overview");
+      void selectView(event.payload === "settings" ? "settings" : event.payload === "access" ? "access" : "overview");
     }).then((unlisten) => (navigateUnlisten = unlisten));
     void refreshOverview();
     return () => {
@@ -457,6 +561,9 @@
       <button class:active={activeView === "transports"} onclick={() => selectView("transports")}>
         <span class="nav-icon"><Icon name="transports" /></span> Transports <em>{transports.length || number(status.transport_count)}</em>
       </button>
+      <button class:active={activeView === "access"} onclick={() => selectView("access")}>
+        <span class="nav-icon"><Icon name="access" /></span> Access control <em>{allowEntries.length + denyEntries.length || ""}</em>
+      </button>
       <button class:active={activeView === "settings"} onclick={() => selectView("settings")}>
         <span class="nav-icon"><Icon name="settings" /></span> Settings
       </button>
@@ -472,12 +579,13 @@
     <header class="topbar">
       <div>
         <p>LOCAL NODE</p>
-        <h1>{activeView === "overview" ? "Network overview" : activeView === "peers" ? "Authenticated peers" : activeView === "transports" ? "Transport health" : "Node configuration"}</h1>
+        <h1>{activeView === "overview" ? "Network overview" : activeView === "peers" ? "Authenticated peers" : activeView === "transports" ? "Transport health" : activeView === "access" ? "Peer access control" : "Node configuration"}</h1>
       </div>
       <div class="header-actions">
         <span class="checked">Checked {new Date(snapshot.checked_at_ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span>
         <button class="icon-button" aria-label="Refresh" title="Refresh" onclick={refreshOverview}><Icon name="refresh" size={17} /></button>
         {#if activeView === "peers"}<button class="primary small" onclick={() => (connectOpen = true)}>Connect peer</button>{/if}
+        {#if activeView === "access"}<button type="button" class="primary small" onclick={() => openAclModal("allow")}>Add rule</button>{/if}
       </div>
     </header>
 
@@ -634,6 +742,47 @@
             <article class="panel empty"><div class="empty-icon">⇄</div><h3>No transport data</h3><p>{online ? "The daemon has no configured transport instances." : "Transport details are available when FIPS is running."}</p></article>
           {/each}
         </section>
+      {:else if activeView === "access"}
+        <section class="access-shell">
+          {#if aclLoading && !acl}
+            <div class="panel loading">Loading peer access policy…</div>
+          {:else if aclError && !acl}
+            <article class="panel upgrade-card"><div class="upgrade-icon">⌁</div><h2>Access controls unavailable</h2><p>{aclError}</p><p class="muted">This daemon may predate the <code>show_acl</code> control query.</p><button onclick={() => loadAcl(true)}>Try again</button></article>
+          {:else if acl}
+            <section class="access-summary">
+              <div><span>PEER ACCESS POLICY</span><h2>{accessModeLabel()}</h2><p>{acl.enforcement_active ? "The daemon is enforcing the loaded ACL files." : "The daemon reported that ACL enforcement is not active."}</p></div>
+              <span class="pill {acl.enforcement_active ? 'healthy' : 'stopped'}">{acl.enforcement_active ? "Enforced" : "Not enforced"}</span>
+              <div class="access-summary-stats"><div><strong>{allowEntries.length}</strong><span>Allowed entries</span></div><div><strong>{denyEntries.length}</strong><span>Blocked entries</span></div><div><strong>{peers.length}</strong><span>Connected peers</span></div></div>
+            </section>
+
+            <div class="acl-columns">
+              <article class="panel acl-card allow-card">
+                <div class="panel-title"><div><span>WHITELIST</span><h3>Always allow these peers</h3></div><button type="button" class="secondary small" onclick={() => openAclModal("allow")}>Add</button></div>
+                <p class="acl-path">{acl.allow_file ?? "peers.allow"}</p>
+                {#if allowEntries.length}
+                  <div class="acl-entry-list">{#each allowEntries as entry}<div><code>{entry}</code><button type="button" class="danger-text" disabled={aclBusy} onclick={() => requestRemoveAclEntry("allow", entry)}>Remove</button></div>{/each}</div>
+                {:else}<div class="empty embedded"><p>No explicit whitelist entries.</p><button type="button" onclick={() => openAclModal("allow")}>Add the first allowed peer</button></div>{/if}
+              </article>
+              <article class="panel acl-card deny-card">
+                <div class="panel-title"><div><span>BLOCKLIST</span><h3>Reject these peers</h3></div><button type="button" class="secondary small" onclick={() => openAclModal("deny")}>Add</button></div>
+                <p class="acl-path">{acl.deny_file ?? "peers.deny"}</p>
+                {#if denyEntries.length}
+                  <div class="acl-entry-list">{#each denyEntries as entry}<div><code>{entry}</code><button type="button" class="danger-text" disabled={aclBusy} onclick={() => requestRemoveAclEntry("deny", entry)}>Remove</button></div>{/each}</div>
+                {:else}<div class="empty embedded"><p>No blocked peers.</p><button type="button" onclick={() => openAclModal("deny")}>Block a peer</button></div>{/if}
+              </article>
+            </div>
+
+            <section class="panel access-peer-panel">
+              <div class="panel-title"><div><span>LIVE CONNECTIONS</span><h3>Cut an active connection</h3></div><button class="text-button" onclick={() => selectView("peers")}>Open peers →</button></div>
+              {#if peers.length}
+                <div class="access-peer-list">{#each peers as peer}<div><span class="peer-cell"><i>{(peer.display_name || "P").slice(0, 1).toUpperCase()}</i><span><strong>{peer.display_name || shortId(peer.npub)}</strong><small>{shortId(peer.npub)} · {peer.transport_type ?? "unknown"}</small></span></span><button class="danger" disabled={actionBusy} onclick={() => disconnect(peer)}>Disconnect</button></div>{/each}</div>
+              {:else}<div class="empty embedded"><p>No active peer connections.</p></div>{/if}
+            </section>
+
+            <div class="access-note"><strong>Changes are live.</strong> FIPS reloads these ACL files automatically. Entries accept npubs, configured aliases, or the <code>ALL</code> wildcard. Adding <code>ALL</code> to the blocklist makes the whitelist strict.</div>
+          {/if}
+          {#if aclError && acl}<div class="inline-error">{aclError}</div>{/if}
+        </section>
       {:else}
         <section class="settings-shell">
           {#if configLoading}<div class="panel loading">Loading daemon configuration…</div>
@@ -644,6 +793,16 @@
               <div><span>ACTIVE SOURCE</span><strong>{config.source === "managed" ? "Managed by FIPS Monitor" : "Operator configuration"}</strong><code>{config.source === "managed" ? config.managed_path : config.base_path}</code></div>
               <div class="segmented"><button class:active={settingsMode === "guided"} onclick={() => (settingsMode = "guided")}>Guided</button><button class:active={settingsMode === "yaml"} onclick={() => (settingsMode = "yaml")}>Advanced YAML</button></div>
             </div>
+
+            <section class="panel strict-allowlist-help">
+              <div class="strict-allowlist-copy"><span>PEER ACCESS CONTROL</span><h2>For a strict whitelist</h2><p>Adding a peer to <code>peers.allow</code> alone does not create a strict whitelist. To allow only selected peers, add the approved peer to the allow list and <code>ALL</code> to the block list.</p></div>
+              <pre><code>peers.allow:
+  npub1-approved-peer
+
+peers.deny:
+  ALL</code></pre>
+              <p class="strict-allowlist-footnote"><code>ALL</code> blocks unmatched peers. An explicitly allowed peer still wins if it appears in both lists. Use the Access control page to edit these entries.</p>
+            </section>
 
             {#if settingsMode === "guided"}
               <div class="settings-layout">
@@ -741,6 +900,30 @@
   </div>
 {/if}
 
+{#if aclModal}
+  <div class="modal-backdrop" role="presentation" onclick={(event) => event.target === event.currentTarget && (aclModal = null)}>
+    <form class="modal" onsubmit={(event) => { event.preventDefault(); void addAclEntry(aclModal!); }}>
+      <button type="button" class="drawer-close" onclick={() => (aclModal = null)}>×</button>
+      <span>PEER ACCESS CONTROL</span><h2>{aclModal === "allow" ? "Add to whitelist" : "Add to blocklist"}</h2><p>Use a peer npub, a configured host alias, or <code>ALL</code>. FIPS reloads the file automatically. macOS may ask for administrator approval.</p>
+      <label class="field"><span>{aclModal === "allow" ? "Allowed peer" : "Blocked peer"}</span><input required placeholder="npub1… or alias" bind:value={aclEntry}/></label>
+      {#if aclError}<div class="modal-error"><strong>Rule was not saved</strong><span>{aclError}</span></div>{/if}
+      <div class="modal-actions"><button type="button" onclick={() => (aclModal = null)}>Cancel</button><button class="primary" disabled={aclBusy}>{aclBusy ? "Saving…" : "Save rule"}</button></div>
+    </form>
+  </div>
+{/if}
+
+{#if aclRemoval}
+  <div class="modal-backdrop" role="presentation" onclick={(event) => event.target === event.currentTarget && (aclRemoval = null)}>
+    <form class="modal" onsubmit={(event) => { event.preventDefault(); void removeAclEntry(aclRemoval!.list, aclRemoval!.entry); }}>
+      <button type="button" class="drawer-close" onclick={() => (aclRemoval = null)}>×</button>
+      <span>PEER ACCESS CONTROL</span><h2>Remove rule?</h2>
+      <p>Remove <code>{aclRemoval.entry}</code> from the {aclRemoval.list === "allow" ? "whitelist" : "blocklist"}? FIPS will reload the policy after the file changes. macOS may ask for administrator approval.</p>
+      {#if aclError}<div class="modal-error"><strong>Rule was not removed</strong><span>{aclError}</span></div>{/if}
+      <div class="modal-actions"><button type="button" onclick={() => (aclRemoval = null)}>Cancel</button><button type="submit" class="danger" disabled={aclBusy}>{aclBusy ? "Removing…" : "Remove rule"}</button></div>
+    </form>
+  </div>
+{/if}
+
 {#if toast}<button class="toast" onclick={() => (toast = "")}>{toast}<span>×</span></button>{/if}
 
 <style>
@@ -784,10 +967,12 @@
   .empty { min-height: 300px; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #71867e; text-align: center; }.empty h3 { margin: 8px 0; color: #d7e8e1; font-size: 14px; }.empty p { max-width: 340px; font-size: 11px; }.empty-icon { display: grid; place-items: center; width: 52px; height: 52px; border: 1px solid #243a32; border-radius: 50%; color: #4bd6a3; background: #102119; font-size: 21px; }
   .detail-drawer { position: fixed; z-index: 5; top: 88px; right: 0; bottom: 0; width: 315px; padding: 24px; border-left: 1px solid #24372f; background: #0c1814; box-shadow: -20px 0 50px rgba(0,0,0,.28); }.drawer-close { position: absolute; top: 15px; right: 15px; border: 0; background: transparent; color: #71857e; font-size: 20px; }.detail-drawer h2 { margin: 0 0 3px; font-size: 17px; }.detail-drawer>code { display: block; overflow-wrap: anywhere; color: #5b7168; font-size: 8px; }.detail-drawer dl,.transport-card dl { margin: 25px 0; }.detail-drawer dl div,.transport-card dl div { display: grid; grid-template-columns: 1fr 1.3fr; gap: 8px; padding: 9px 0; border-bottom: 1px solid #1b2d26; font-size: 10px; }.detail-drawer dt,.transport-card dt { color: #566b63; }.detail-drawer dd,.transport-card dd { margin: 0; overflow-wrap: anywhere; color: #a8bbb4; text-align: right; }.danger { width: 100%; border-color: #53342e; color: #e58576; background: #241512; }
   .lan-diagnostics { margin-bottom: 18px; padding: 2px 0 16px; border-bottom: 1px solid #22382f; }.lan-diagnostics-head { display: flex; align-items: flex-start; justify-content: space-between; }.lan-diagnostics-head>div>span,.lan-diagnostics.unsupported>div>span,.skip-reasons>span:first-child { color: #61776e; font-size: 9px; font-weight: 700; letter-spacing: .16em; }.lan-diagnostics h2 { margin: 5px 0 4px; font-size: 17px; font-weight: 580; }.lan-diagnostics-head p,.lan-diagnostics.unsupported p { margin: 0; color: #647a71; font-size: 10px; }.diagnostic-metrics { display: grid; grid-template-columns: minmax(170px,1.8fr) repeat(5,minmax(75px,1fr)); gap: 18px; margin-top: 17px; padding: 13px 0; border-top: 1px solid #1b3028; border-bottom: 1px solid #1b3028; }.diagnostic-metrics>div { min-width: 0; display: flex; flex-direction: column; gap: 5px; }.diagnostic-metrics span { color: #536a61; font-size: 7.5px; font-weight: 700; letter-spacing: .1em; }.diagnostic-metrics strong { overflow: hidden; font-size: 11px; font-weight: 570; text-overflow: ellipsis; white-space: nowrap; }.diagnostic-warning { position: relative; margin-top: 13px; padding: 2px 120px 2px 12px; border-left: 2px solid #d6a955; color: #d9b66f; }.diagnostic-warning strong { font-size: 10.5px; }.diagnostic-warning p,.diagnostic-note { margin: 4px 0 0; color: #9b8760; font-size: 10px; line-height: 1.45; }.diagnostic-warning button { position: absolute; top: 1px; right: 0; padding: 6px 9px; font-size: 9px; }.diagnostic-note { color: #73877f; }.skip-reasons { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 12px; color: #73877f; font-size: 9px; }.skip-reasons>span:first-child { margin-right: 3px; }.skip-reasons b { color: #a5b9b1; }.lan-diagnostics.unsupported { padding-top: 2px; }.transport-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 13px; }.transport-card { display: grid; grid-template-columns: 43px 1fr; gap: 15px; }.transport-icon { display: grid; place-items: center; width: 43px; height: 43px; border: 1px solid #284039; border-radius: 9px; color: #54d9a8; background: #10211b; }.transport-title { grid-column: 2; }.transport-title span:first-child { color: #5bd7aa; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .13em; }.transport-title h3 { margin: 5px 0; font-size: 13px; }.transport-card dl { grid-column: 1 / -1; margin-bottom: 0; }
-  .settings-shell { max-width: 940px; margin: 0 auto; }.settings-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; padding: 0 0 15px; border-bottom: 1px solid #1b3028; }.settings-header>div:first-child { display: flex; min-width: 0; flex-direction: column; gap: 3px; }.settings-header strong { font-size: 13px; font-weight: 590; }.settings-header code { overflow: hidden; color: #60766d; font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }.segmented { display: flex; flex: 0 0 auto; padding: 3px; border: 1px solid #20332b; border-radius: 7px; background: #091511; }.segmented button { padding: 6px 10px; border: 0; background: transparent; font-size: 10.5px; }.segmented button.active { color: #dff8ee; background: #183027; }
+  .settings-shell { max-width: 940px; margin: 0 auto; }.settings-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; padding: 0 0 15px; border-bottom: 1px solid #1b3028; }.settings-header>div:first-child { display: flex; min-width: 0; flex-direction: column; gap: 3px; }.settings-header strong { font-size: 13px; font-weight: 590; }.settings-header code { overflow: hidden; color: #60766d; font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }.segmented { display: flex; flex: 0 0 auto; padding: 3px; border: 1px solid #20332b; border-radius: 7px; background: #091511; }.segmented button { padding: 6px 10px; border: 0; background: transparent; font-size: 10.5px; }.segmented button.active { color: #dff8ee; background: #183027; }.strict-allowlist-help { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 15px 22px; margin-bottom: 16px; padding: 15px 17px; border-top-color: #8d6c36; }.strict-allowlist-copy>span { color: #b99a5d; font-size: 9px; font-weight: 700; letter-spacing: .16em; }.strict-allowlist-copy h2 { margin: 5px 0 6px; font-size: 15px; font-weight: 580; }.strict-allowlist-copy p,.strict-allowlist-footnote { margin: 0; color: #8e8871; font-size: 10.5px; line-height: 1.5; }.strict-allowlist-copy code,.strict-allowlist-footnote code { color: #d0b77d; }.strict-allowlist-help pre { align-self: center; margin: 0; padding: 9px 11px; border: 1px solid #3a3423; border-radius: 6px; color: #d6c28f; background: #15150f; font: 10px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }.strict-allowlist-footnote { grid-column: 1 / -1; padding-top: 11px; border-top: 1px solid #2d3226; font-size: 9.5px; }
   .settings-layout { display: grid; grid-template-columns: 188px minmax(0,1fr); gap: 0; }.settings-nav { align-self: start; padding: 3px 20px 3px 0; border-right: 1px solid #1a2d26; }.settings-nav button { padding: 10px 11px; border-radius: 6px; font-size: 12px; line-height: 1.25; }.settings-nav button.active { color: #e9fff7; background: #13251e; }.settings-nav button em { font-size: 10.5px; }.settings-form { min-width: 0; min-height: 392px; padding: 3px 0 28px 28px; }.form-title { margin-bottom: 14px; padding-bottom: 15px; border-bottom: 1px solid #1d3029; }.form-title h2 { margin: 5px 0 6px; font-size: 18px; font-weight: 580; letter-spacing: -.01em; }.form-title p,.modal>p { max-width: 620px; margin: 0; color: #71867e; font-size: 11.5px; line-height: 1.5; }.toggle-row { position: relative; display: flex; align-items: center; justify-content: space-between; min-height: 59px; padding: 11px 0; border-bottom: 1px solid #192b24; cursor: pointer; }.toggle-row>span { display: flex; flex-direction: column; gap: 4px; }.toggle-row strong { font-size: 12px; font-weight: 580; }.toggle-row small { color: #6b8078; font-size: 10.5px; line-height: 1.35; }.toggle-row input { position: absolute; opacity: 0; }.toggle-row>i { position: relative; width: 31px; height: 17px; border-radius: 20px; background: #263630; transition: .2s; }.toggle-row>i::after { content: ""; position: absolute; top: 3px; left: 3px; width: 11px; height: 11px; border-radius: 50%; background: #778981; transition: .2s; }.toggle-row input:checked+i { background: #2c765d; }.toggle-row input:checked+i::after { left: 17px; background: #69e2b6; }.toggle-row.compact { min-height: 40px; border: 0; }.field { display: flex; flex-direction: column; gap: 6px; margin-top: 14px; }.field>span { color: #7a8f87; font-size: 10.5px; font-weight: 600; }.field input,.field select,.path-field input { width: 100%; height: 36px; padding: 0 10px; border: 1px solid #263a32; border-radius: 6px; outline: 0; color: #c8d9d2; background: #091511; font-size: 11.5px; }.field input:focus,.field select:focus,.path-field input:focus,textarea:focus { border-color: #378a6b; }.field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }.info-box { margin-top: 18px; padding: 3px 0 3px 12px; border-left: 2px solid #2f6652; color: #789087; font-size: 10.5px; line-height: 1.5; }.inline-warning { display: flex; align-items: center; gap: 14px; margin: 10px 0; padding: 10px 0 10px 12px; border-left: 2px solid #d3a651; }.inline-warning>div { min-width: 0; flex: 1; }.inline-warning strong { color: #e3bd72; font-size: 10.5px; }.inline-warning p { margin: 3px 0 0; color: #9a855e; font-size: 10px; line-height: 1.4; }.inline-warning button { flex: 0 0 auto; padding: 6px 9px; color: #dfbc76; font-size: 9px; }.transport-setting { margin: 0; padding: 0 0 15px; border-bottom: 1px solid #1d3029; }.transport-setting + .transport-setting { margin-top: 2px; }
   .peer-form-title { display: flex; align-items: flex-start; justify-content: space-between; }.peer-editor { margin: 0; padding: 15px 0 18px; border-bottom: 1px solid #20362d; }.peer-editor-title { display: flex; justify-content: space-between; }.peer-editor-title strong { font-size: 11px; }.danger-text { color: #df7e70; }.empty.embedded { min-height: 180px; border-top: 1px dashed #294038; border-bottom: 1px dashed #294038; border-radius: 0; }
   .yaml-panel { padding-left: 0; }.yaml-panel textarea { width: 100%; min-height: 415px; resize: vertical; padding: 14px; border: 1px solid #233831; border-radius: 6px; outline: 0; color: #b9d8ca; background: #06100d; font: 10.5px/1.58 ui-monospace, SFMono-Regular, Menlo, monospace; tab-size: 2; }.editor-footer { display: flex; justify-content: space-between; margin-top: 8px; color: #60756d; font-size: 9px; }.inline-error,.apply-message { margin: 10px 0; padding: 11px 13px; border: 1px solid #57342e; border-radius: 6px; color: #de8b7d; background: #201411; font-size: 10.5px; }.apply-message { border-color: #2a4c3d; color: #84cbb0; background: #102019; }.review-panel { margin-top: 14px; padding: 17px 0; border-top: 1px solid #244036; border-bottom: 1px solid #244036; }.review-head h2 { margin: 5px 0 0; font-size: 15px; }.impact { padding: 5px 9px; border-radius: 20px; color: #76d4b2; background: #143025; font-size: 9px; }.impact.restart { color: #dfb567; background: #2a2214; }.diff-list { margin-top: 14px; }.diff-list>div { display: grid; grid-template-columns: minmax(120px,.65fr) 1.4fr; gap: 15px; padding: 10px 0; border-top: 1px solid #1c3028; font-size: 9px; }.diff-list>div>span { display: grid; grid-template-columns: 1fr 15px 1fr; gap: 6px; min-width: 0; }.diff-list del,.diff-list ins { overflow: hidden; color: #967b76; text-decoration: none; text-overflow: ellipsis; }.diff-list ins { color: #7bb69f; }.diff-list b { color: #536960; text-align: center; }.warnings { color: #d2ae68; font-size: 9px; }.validation-errors { margin-top: 14px; }.validation-errors>div { padding: 10px 12px; border: 1px solid #54332e; border-radius: 6px; background: #201411; }.validation-errors code { color: #e29183; font-size: 9px; }.validation-errors p { margin: 5px 0 0; color: #b9877f; font-size: 9px; line-height: 1.45; }.settings-actions { display: flex; align-items: center; gap: 7px; margin: 11px 0 18px; padding-top: 2px; }.settings-actions>span { flex: 1; }.settings-action { padding: 6px 10px; font-size: 10.5px; }.developer-settings { margin-top: 8px; padding: 13px 0 0; border-top: 1px solid #1b3028; }.developer-settings summary { cursor: pointer; color: #849991; font-size: 11px; }.developer-settings p { margin: 12px 0; color: #657a72; font-size: 10.5px; }.path-field { display: flex; gap: 8px; }.path-field input { flex: 1; }.upgrade-card { min-height: 300px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }.upgrade-card h2 { margin-bottom: 8px; font-size: 16px; }.upgrade-card p { max-width: 440px; color: #7c9088; font-size: 11px; }.upgrade-icon { display: grid; place-items: center; width: 48px; height: 48px; margin-bottom: 14px; border-radius: 50%; color: #e0b565; background: #2a2214; }.muted { color: #5f746c !important; }
   .modal-backdrop { position: fixed; z-index: 20; inset: 0; display: grid; place-items: center; background: rgba(1,6,4,.72); backdrop-filter: blur(5px); }.modal { position: relative; width: min(500px,calc(100vw - 50px)); padding: 25px; border: 1px solid #2b4138; border-radius: 13px; background: #0d1b17; box-shadow: 0 30px 80px rgba(0,0,0,.45); }.modal h2 { margin: 6px 0; font-size: 20px; }.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 22px; padding-top: 15px; border-top: 1px solid #1d3029; }.toast { position: fixed; z-index: 30; right: 22px; bottom: 21px; display: flex; gap: 18px; align-items: center; max-width: 420px; border-color: #315447; color: #bee0d3; background: #132820; box-shadow: 0 16px 50px rgba(0,0,0,.35); font-size: 10px; }.toast span { color: #688178; }.floating-error { position: fixed; right: 25px; bottom: 24px; padding: 10px 13px; border: 1px solid #51342f; border-radius: 8px; color: #dc897b; background: #201411; font-size: 9px; }.loading { display: grid; min-height: 260px; place-items: center; color: #60756d; font-size: 11px; }
+  .modal-error { display: flex; flex-direction: column; gap: 4px; margin-top: 14px; padding: 10px 12px; border: 1px solid #57342e; border-radius: 7px; color: #e29183; background: #201411; font-size: 10px; line-height: 1.4; }.modal-error strong { font-size: 10.5px; }.modal-error span { color: #c28379; overflow-wrap: anywhere; }
+  .access-shell { max-width: 1020px; margin: 0 auto; }.access-summary { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 16px 24px; align-items: start; margin-bottom: 14px; padding: 18px 19px; border: 1px solid #1d3029; border-radius: 11px; background: linear-gradient(145deg, rgba(17,33,27,.94), rgba(10,22,18,.96)); }.access-summary>div:first-child>span { color: #61776e; font-size: 9px; font-weight: 700; letter-spacing: .16em; }.access-summary h2 { margin: 6px 0 5px; font-size: 18px; font-weight: 580; }.access-summary p { margin: 0; color: #71867e; font-size: 10.5px; }.access-summary>.pill { margin-top: 1px; }.access-summary-stats { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3,1fr); gap: 14px; padding-top: 13px; border-top: 1px solid #1d3029; }.access-summary-stats div { display: flex; flex-direction: column; gap: 4px; }.access-summary-stats strong { font-size: 18px; font-weight: 550; }.access-summary-stats span { color: #5d736a; font-size: 8px; text-transform: uppercase; letter-spacing: .1em; }.acl-columns { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 13px; }.acl-card { min-width: 0; }.acl-card.allow-card { border-top-color: #2e6b53; }.acl-card.deny-card { border-top-color: #704039; }.acl-path { margin: 12px 0; overflow: hidden; color: #61776e; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }.acl-entry-list { border-top: 1px solid #1b2d26; }.acl-entry-list>div { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 42px; border-bottom: 1px solid #1b2d26; }.acl-entry-list code { min-width: 0; overflow-wrap: anywhere; color: #b8d5c9; font-size: 10px; }.acl-entry-list button { flex: 0 0 auto; }.access-peer-panel { margin-top: 13px; }.access-peer-list { margin-top: 13px; border-top: 1px solid #1b2d26; }.access-peer-list>div { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 9px 0; border-bottom: 1px solid #1b2d26; }.access-peer-list .peer-cell { min-width: 0; }.access-peer-list .danger { width: auto; flex: 0 0 auto; padding: 6px 10px; font-size: 9px; }.access-note { margin-top: 13px; padding: 11px 13px; border-left: 2px solid #316a54; color: #71867e; background: rgba(16,36,28,.48); font-size: 10px; line-height: 1.5; }.access-note strong { color: #9bcbb9; }.access-note code { color: #a4c8ba; }
   @media (max-width: 900px) { .app-shell { grid-template-columns: 190px 1fr; }.hero-grid,.dashboard-grid { grid-template-columns: 1fr; }.tun-card { min-height: 180px; }.stat-grid { grid-template-columns: repeat(2,1fr); }.lan-summary { grid-template-columns: 9px 1fr auto; }.lan-summary>span:nth-of-type(3),.lan-summary>span:nth-of-type(4) { display: none; }.diagnostic-metrics { grid-template-columns: repeat(3,1fr); }.transport-grid { grid-template-columns: 1fr; }.content { padding-left: 20px; padding-right: 20px; }.metrics.four { grid-template-columns: repeat(2,1fr); }.settings-layout { grid-template-columns: 156px 1fr; }.settings-nav { padding-right: 12px; }.settings-form { padding-left: 20px; } }
 </style>

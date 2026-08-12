@@ -18,6 +18,8 @@ and onboarding appear when requested or when the local node needs attention.
 - Reports node health, identity, version, uptime, mesh address, and TUN state.
 - Lists peers and transports with connection and quality details.
 - Supports confirmed peer connect and disconnect actions.
+- Provides an Access Control page for the live peer whitelist and blocklist,
+  including add/remove rules and active-peer disconnects.
 - Shows LAN discovery diagnostics and actionable configuration warnings.
 - Provides guided settings and an advanced YAML editor backed by FIPS's
   revisioned, redacted configuration API.
@@ -31,6 +33,19 @@ Local-system interaction stays in Rust. The webview receives typed Tauri
 commands and events and has no shell, arbitrary filesystem, HTTP, or opener
 capability. Its content security policy permits only bundled local content and
 Tauri IPC.
+
+Access Control edits are limited to the `peers.allow` and `peers.deny` files
+reported by the daemon, and only when they are in FIPS's standard
+`/etc/fips` or `/usr/local/etc/fips` directories. The app does not run as root
+or retain elevated privileges. Direct-download macOS builds may show the native
+macOS administrator prompt when an ACL file is protected. If authorization is
+canceled or unavailable, the page reports the error and leaves the files unchanged.
+Mac App Store builds remain read-only for these files because the sandbox does
+not grant direct access to the system configuration directory.
+
+The app never receives the password; it writes a temporary validated draft and
+asks macOS to copy it into the one approved FIPS ACL path. App Store builds do
+not use this authorization path.
 
 The production control socket is `/var/run/fips/control.sock`. Access is still
 subject to the socket's POSIX ownership and mode; packaged FIPS installations
@@ -139,7 +154,8 @@ builds.
 ## Scope
 
 The first release is macOS-only. It does not manage external hosts or ACL
-files, the firewall, Linux gateway configuration, automatic updates, or iOS.
+files outside the two standard FIPS peer ACL files, the firewall, Linux gateway
+configuration, automatic updates, or iOS.
 FIPS must release the managed configuration API before the settings controls are
 considered supported. Older daemons remain monitorable and the Settings view
 explains when an upgrade is required.
