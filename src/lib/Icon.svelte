@@ -5,6 +5,7 @@
     | "overview"
     | "peers"
     | "transports"
+    | "access"
     | "settings"
     | "refresh"
     | "copy"
@@ -65,6 +66,9 @@
     <circle cx="16" cy="6" r="2" />
     <circle cx="8" cy="12" r="2" />
     <circle cx="14" cy="18" r="2" />
+  {:else if name === "access"}
+    <path d="M12 3 19 6v5c0 4.5-2.7 7.9-7 10-4.3-2.1-7-5.5-7-10V6l7-3Z" />
+    <path d="m8.5 12 2.3 2.3 4.8-4.8" />
   {:else if name === "refresh"}
     <path d="M20 7v5h-5M4 17v-5h5" />
     <path d="M18.1 12A6.5 6.5 0 0 0 6.8 7.6L4 12M5.9 12a6.5 6.5 0 0 0 11.3 4.4L20 12" />

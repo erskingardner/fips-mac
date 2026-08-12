@@ -1,6 +1,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{io::ErrorKind, path::PathBuf, time::Duration};
+use std::{
+    fs::OpenOptions,
+    io::{ErrorKind, Write},
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use tauri::State;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -171,6 +176,169 @@ pub async fn get_peers(state: State<'_, crate::AppState>) -> Result<Value, Clien
 #[tauri::command]
 pub async fn get_transports(state: State<'_, crate::AppState>) -> Result<Value, ClientError> {
     client(&state).query("show_transports").await
+}
+
+#[tauri::command]
+pub async fn get_acl(state: State<'_, crate::AppState>) -> Result<Value, ClientError> {
+    client(&state).query("show_acl").await
+}
+
+#[tauri::command]
+pub async fn add_acl_entry(
+    state: State<'_, crate::AppState>,
+    list: String,
+    entry: String,
+) -> Result<Value, ClientError> {
+    update_acl_file(&client(&state), &list, &entry, false).await
+}
+
+#[tauri::command]
+pub async fn remove_acl_entry(
+    state: State<'_, crate::AppState>,
+    list: String,
+    entry: String,
+) -> Result<Value, ClientError> {
+    update_acl_file(&client(&state), &list, &entry, true).await
+}
+
+async fn update_acl_file(
+    client: &ControlClient,
+    list: &str,
+    entry: &str,
+    remove: bool,
+) -> Result<Value, ClientError> {
+    let list = match list {
+        "allow" | "deny" => list,
+        _ => {
+            return Err(ClientError::new(
+                "invalid_acl_list",
+                "ACL list must be either allow or deny",
+            ));
+        }
+    };
+    let entry = normalize_acl_entry(entry)?;
+    let snapshot = client.query("show_acl").await?;
+    let key = if list == "allow" {
+        "allow_file"
+    } else {
+        "deny_file"
+    };
+    let path = snapshot
+        .get(key)
+        .and_then(Value::as_str)
+        .ok_or_else(|| ClientError::new("protocol", format!("show_acl did not return {key}")))?;
+    let path = validate_acl_path(path, list)?;
+    let changed = write_acl_entry(&path, &entry, remove)?;
+    Ok(json!({
+        "changed": changed,
+        "entry": entry,
+        "list": list,
+        "path": path.display().to_string(),
+    }))
+}
+
+fn normalize_acl_entry(entry: &str) -> Result<String, ClientError> {
+    let entry = entry.trim();
+    if entry.is_empty() {
+        return Err(ClientError::new(
+            "invalid_acl_entry",
+            "ACL entry cannot be empty",
+        ));
+    }
+    if entry.len() > 256
+        || entry.starts_with('#')
+        || entry
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+        || entry.chars().any(|character| {
+            !character.is_ascii_alphanumeric() && !matches!(character, '.' | '_' | '-')
+        })
+    {
+        return Err(ClientError::new(
+            "invalid_acl_entry",
+            "ACL entries may contain only letters, numbers, dots, underscores, and hyphens",
+        ));
+    }
+    if entry.eq_ignore_ascii_case("all") {
+        Ok("ALL".into())
+    } else {
+        Ok(entry.into())
+    }
+}
+
+fn validate_acl_path(path: &str, list: &str) -> Result<PathBuf, ClientError> {
+    let path = PathBuf::from(path);
+    let expected_name = if list == "allow" {
+        "peers.allow"
+    } else {
+        "peers.deny"
+    };
+    let standard_parent = [Path::new("/etc/fips"), Path::new("/usr/local/etc/fips")];
+    let is_standard_path = path.is_absolute()
+        && path.file_name().and_then(|name| name.to_str()) == Some(expected_name)
+        && path
+            .parent()
+            .is_some_and(|parent| standard_parent.contains(&parent));
+    if !is_standard_path {
+        return Err(ClientError::new(
+            "invalid_acl_path",
+            "FIPS returned an ACL path outside its standard system configuration directory",
+        ));
+    }
+    Ok(path)
+}
+
+fn write_acl_entry(path: &Path, entry: &str, remove: bool) -> Result<bool, ClientError> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == ErrorKind::NotFound && !remove => String::new(),
+        Err(error) => return Err(acl_file_error("read", path, error)),
+    };
+    let trailing_newline = contents.ends_with('\n');
+    let mut lines: Vec<String> = contents.lines().map(ToOwned::to_owned).collect();
+    let was_present = lines
+        .iter()
+        .any(|line| line.trim().eq_ignore_ascii_case(entry));
+    let changed = if remove {
+        lines.retain(|line| !line.trim().eq_ignore_ascii_case(entry));
+        was_present
+    } else if was_present {
+        false
+    } else {
+        lines.push(entry.to_owned());
+        true
+    };
+    if !changed {
+        return Ok(false);
+    }
+
+    let mut output = lines.join("\n");
+    if !output.is_empty() && (trailing_newline || !remove) {
+        output.push('\n');
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(path)
+        .map_err(|error| acl_file_error("open", path, error))?;
+    file.write_all(output.as_bytes())
+        .map_err(|error| acl_file_error("write", path, error))?;
+    file.sync_all()
+        .map_err(|error| acl_file_error("sync", path, error))?;
+    Ok(true)
+}
+
+fn acl_file_error(operation: &str, path: &Path, error: std::io::Error) -> ClientError {
+    let kind = if error.kind() == ErrorKind::PermissionDenied {
+        "permission_denied"
+    } else {
+        "acl_file"
+    };
+    ClientError::new(
+        kind,
+        format!("Could not {operation} {}: {error}", path.display()),
+    )
 }
 
 #[tauri::command]
@@ -375,6 +543,41 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.kind, "timeout");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn validates_acl_entries_and_paths() {
+        assert_eq!(normalize_acl_entry(" all ").unwrap(), "ALL");
+        assert_eq!(normalize_acl_entry("core-vm").unwrap(), "core-vm");
+        assert_eq!(normalize_acl_entry("npub1example").unwrap(), "npub1example");
+        assert_eq!(
+            normalize_acl_entry("bad entry").unwrap_err().kind,
+            "invalid_acl_entry"
+        );
+        assert_eq!(
+            validate_acl_path("/usr/local/etc/fips/peers.allow", "allow").unwrap(),
+            PathBuf::from("/usr/local/etc/fips/peers.allow")
+        );
+        assert_eq!(
+            validate_acl_path("/tmp/peers.allow", "allow")
+                .unwrap_err()
+                .kind,
+            "invalid_acl_path"
+        );
+    }
+
+    #[test]
+    fn updates_acl_entries_without_removing_comments() {
+        let path = socket_path("acl-file");
+        fs::write(&path, "# managed by operator\nnpub1existing\n").unwrap();
+        assert!(write_acl_entry(&path, "npub1added", false).unwrap());
+        assert!(!write_acl_entry(&path, "npub1added", false).unwrap());
+        assert!(write_acl_entry(&path, "npub1existing", true).unwrap());
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "# managed by operator\nnpub1added\n"
+        );
         let _ = fs::remove_file(path);
     }
 }

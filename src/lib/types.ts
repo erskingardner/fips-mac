@@ -69,6 +69,20 @@ export interface Transport {
   stats?: Record<string, unknown>;
 }
 
+export interface AclSnapshot {
+  allow_file?: string;
+  deny_file?: string;
+  enforcement_active?: boolean;
+  effective_mode?: string;
+  default_decision?: string;
+  allow_all?: boolean;
+  deny_all?: boolean;
+  allow_file_entries?: string[];
+  deny_file_entries?: string[];
+  allow_entries?: string[];
+  deny_entries?: string[];
+}
+
 export interface ConfigSnapshot {
   source: "operator" | "managed";
   base_path: string;
