@@ -28,6 +28,7 @@
 
   type View = "overview" | "peers" | "transports" | "access" | "settings";
   type AclList = "allow" | "deny";
+  type AclRemoval = { list: AclList; entry: string };
   type SettingsSection = "identity" | "network" | "discovery" | "transports" | "peers";
 
   const initialSnapshot: MonitorSnapshot = {
@@ -46,6 +47,7 @@
   let aclLoading = $state(false);
   let aclError = $state("");
   let aclModal = $state<AclList | null>(null);
+  let aclRemoval = $state<AclRemoval | null>(null);
   let aclEntry = $state("");
   let aclBusy = $state(false);
   let detailLoading = $state(false);
@@ -259,7 +261,13 @@
 
   function openAclModal(list: AclList) {
     aclModal = list;
+    aclRemoval = null;
     aclEntry = "";
+    aclError = "";
+  }
+
+  function requestRemoveAclEntry(list: AclList, entry: string) {
+    aclRemoval = { list, entry };
     aclError = "";
   }
 
@@ -300,11 +308,11 @@
   }
 
   async function removeAclEntry(list: AclList, entry: string) {
-    if (!window.confirm(`Remove ${entry} from the ${list}list?`)) return;
     aclBusy = true;
     aclError = "";
     try {
       await invoke("remove_acl_entry", { list, entry });
+      aclRemoval = null;
       toast = `${entry} removed from the ${list}list.`;
       await restoreDashboardFocus();
       await refreshAclAfterChange(list, entry, false);
@@ -752,14 +760,14 @@
                 <div class="panel-title"><div><span>WHITELIST</span><h3>Always allow these peers</h3></div><button type="button" class="secondary small" onclick={() => openAclModal("allow")}>Add</button></div>
                 <p class="acl-path">{acl.allow_file ?? "peers.allow"}</p>
                 {#if allowEntries.length}
-                  <div class="acl-entry-list">{#each allowEntries as entry}<div><code>{entry}</code><button class="danger-text" disabled={aclBusy} onclick={() => removeAclEntry("allow", entry)}>Remove</button></div>{/each}</div>
+                  <div class="acl-entry-list">{#each allowEntries as entry}<div><code>{entry}</code><button type="button" class="danger-text" disabled={aclBusy} onclick={() => requestRemoveAclEntry("allow", entry)}>Remove</button></div>{/each}</div>
                 {:else}<div class="empty embedded"><p>No explicit whitelist entries.</p><button type="button" onclick={() => openAclModal("allow")}>Add the first allowed peer</button></div>{/if}
               </article>
               <article class="panel acl-card deny-card">
                 <div class="panel-title"><div><span>BLOCKLIST</span><h3>Reject these peers</h3></div><button type="button" class="secondary small" onclick={() => openAclModal("deny")}>Add</button></div>
                 <p class="acl-path">{acl.deny_file ?? "peers.deny"}</p>
                 {#if denyEntries.length}
-                  <div class="acl-entry-list">{#each denyEntries as entry}<div><code>{entry}</code><button class="danger-text" disabled={aclBusy} onclick={() => removeAclEntry("deny", entry)}>Remove</button></div>{/each}</div>
+                  <div class="acl-entry-list">{#each denyEntries as entry}<div><code>{entry}</code><button type="button" class="danger-text" disabled={aclBusy} onclick={() => requestRemoveAclEntry("deny", entry)}>Remove</button></div>{/each}</div>
                 {:else}<div class="empty embedded"><p>No blocked peers.</p><button type="button" onclick={() => openAclModal("deny")}>Block a peer</button></div>{/if}
               </article>
             </div>
@@ -890,6 +898,18 @@
       <label class="field"><span>{aclModal === "allow" ? "Allowed peer" : "Blocked peer"}</span><input required placeholder="npub1… or alias" bind:value={aclEntry}/></label>
       {#if aclError}<div class="modal-error"><strong>Rule was not saved</strong><span>{aclError}</span></div>{/if}
       <div class="modal-actions"><button type="button" onclick={() => (aclModal = null)}>Cancel</button><button class="primary" disabled={aclBusy}>{aclBusy ? "Saving…" : "Save rule"}</button></div>
+    </form>
+  </div>
+{/if}
+
+{#if aclRemoval}
+  <div class="modal-backdrop" role="presentation" onclick={(event) => event.target === event.currentTarget && (aclRemoval = null)}>
+    <form class="modal" onsubmit={(event) => { event.preventDefault(); void removeAclEntry(aclRemoval!.list, aclRemoval!.entry); }}>
+      <button type="button" class="drawer-close" onclick={() => (aclRemoval = null)}>×</button>
+      <span>PEER ACCESS CONTROL</span><h2>Remove rule?</h2>
+      <p>Remove <code>{aclRemoval.entry}</code> from the {aclRemoval.list === "allow" ? "whitelist" : "blocklist"}? FIPS will reload the policy after the file changes. macOS may ask for administrator approval.</p>
+      {#if aclError}<div class="modal-error"><strong>Rule was not removed</strong><span>{aclError}</span></div>{/if}
+      <div class="modal-actions"><button type="button" onclick={() => (aclRemoval = null)}>Cancel</button><button type="submit" class="danger" disabled={aclBusy}>{aclBusy ? "Removing…" : "Remove rule"}</button></div>
     </form>
   </div>
 {/if}
