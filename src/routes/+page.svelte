@@ -297,8 +297,8 @@
       toast = result.changed === false
         ? `${entry} is already on the ${list}list.`
         : `${entry} added to the ${list}list.`;
-      await restoreDashboardFocus();
       await refreshAclAfterChange(list, entry, true);
+      await restoreDashboardFocus();
     } catch (error) {
       aclError = errorMessage(error);
       await restoreDashboardFocus();
@@ -314,8 +314,8 @@
       await invoke("remove_acl_entry", { list, entry });
       aclRemoval = null;
       toast = `${entry} removed from the ${list}list.`;
-      await restoreDashboardFocus();
       await refreshAclAfterChange(list, entry, false);
+      await restoreDashboardFocus();
     } catch (error) {
       aclError = errorMessage(error);
       await restoreDashboardFocus();

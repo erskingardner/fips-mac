@@ -259,6 +259,18 @@ fn show_window(app: &AppHandle, section: &str) {
         let _ = window.unminimize();
         let _ = window.set_focus();
         let _ = window.emit("app://navigate", section);
+
+        // macOS can finish dismissing the administrator dialog after the
+        // command returns. Retry after that transition so an accessory app
+        // is made key again instead of remaining behind the previously active
+        // application.
+        let focus_retry = window.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let _ = focus_retry.show();
+            let _ = focus_retry.unminimize();
+            let _ = focus_retry.set_focus();
+        });
     }
 }
 
