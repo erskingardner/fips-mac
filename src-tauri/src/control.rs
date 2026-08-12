@@ -185,7 +185,26 @@ pub async fn get_transports(state: State<'_, crate::AppState>) -> Result<Value, 
 
 #[tauri::command]
 pub async fn get_acl(state: State<'_, crate::AppState>) -> Result<Value, ClientError> {
-    client(&state).query("show_acl").await
+    let mut snapshot = client(&state).query("show_acl").await?;
+    for (list, path_key, entries_key) in [
+        ("allow", "allow_file", "allow_file_entries"),
+        ("deny", "deny_file", "deny_file_entries"),
+    ] {
+        let path = snapshot
+            .get(path_key)
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let Some(path) = path else { continue };
+        let Ok(path) = validate_acl_path(&path, list) else {
+            continue;
+        };
+        if let Ok(entries) = read_acl_file_entries(&path)
+            && let Some(object) = snapshot.as_object_mut()
+        {
+            object.insert(entries_key.into(), json!(entries));
+        }
+    }
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -291,6 +310,15 @@ fn validate_acl_path(path: &str, list: &str) -> Result<PathBuf, ClientError> {
         ));
     }
     Ok(path)
+}
+
+fn read_acl_file_entries(path: &Path) -> Result<Vec<String>, std::io::Error> {
+    Ok(std::fs::read_to_string(path)?
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(ToOwned::to_owned)
+        .collect())
 }
 
 fn write_acl_entry(path: &Path, entry: &str, remove: bool) -> Result<bool, ClientError> {

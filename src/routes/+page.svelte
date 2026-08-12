@@ -272,6 +272,11 @@
     }
   }
 
+  async function restoreDashboardFocus() {
+    if (!isTauri()) return;
+    await invoke("focus_dashboard").catch(() => {});
+  }
+
   async function addAclEntry(list: AclList) {
     const entry = aclEntry.trim();
     if (!entry) return;
@@ -284,9 +289,11 @@
       toast = result.changed === false
         ? `${entry} is already on the ${list}list.`
         : `${entry} added to the ${list}list.`;
+      await restoreDashboardFocus();
       await refreshAclAfterChange(list, entry, true);
     } catch (error) {
       aclError = errorMessage(error);
+      await restoreDashboardFocus();
     } finally {
       aclBusy = false;
     }
@@ -299,9 +306,11 @@
     try {
       await invoke("remove_acl_entry", { list, entry });
       toast = `${entry} removed from the ${list}list.`;
+      await restoreDashboardFocus();
       await refreshAclAfterChange(list, entry, false);
     } catch (error) {
       aclError = errorMessage(error);
+      await restoreDashboardFocus();
     } finally {
       aclBusy = false;
     }

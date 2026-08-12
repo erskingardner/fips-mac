@@ -262,6 +262,11 @@ fn show_window(app: &AppHandle, section: &str) {
     }
 }
 
+#[tauri::command]
+fn focus_dashboard(app: AppHandle) {
+    show_window(&app, "access");
+}
+
 fn icon_for_health(health: &str) -> Image<'static> {
     const LOGICAL_SIZE: i32 = 18;
     const SCALE: i32 = 2;
@@ -523,6 +528,7 @@ pub fn run() {
             control::set_socket_path,
             control::refresh_now,
             copy_node_npub,
+            focus_dashboard,
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
