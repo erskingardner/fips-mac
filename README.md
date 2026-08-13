@@ -167,7 +167,9 @@ The script refuses a different revision or tracked local changes.
 Tags matching `v*` build the universal Apple Silicon/Intel target and produce a
 signed, notarized DMG. The release workflow verifies all three executable
 signatures, Gatekeeper, stapling, launchd plists, and architecture slices before
-publishing a draft GitHub release.
+publishing a public GitHub release with generated release notes and a SHA-256
+checksum. See [Developer ID distribution](docs/developer-id.md) for the required
+repository secrets and release procedure.
 
 For the separate monitor-only Mac App Store package, follow
 [docs/app-store.md](docs/app-store.md). App Store packaging uses a separate

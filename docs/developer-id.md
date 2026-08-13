@@ -92,6 +92,41 @@ local signed-only validation can set `APPLE_SIGNING_IDENTITY`; a public release
 must additionally provide either Apple ID/app-password/team credentials or an
 App Store Connect API key so notarization and stapling complete.
 
+## GitHub release setup
+
+The tag workflow publishes one universal DMG for both Apple Silicon and Intel.
+Configure these GitHub Actions repository secrets before creating a release
+tag:
+
+- `APPLE_CERTIFICATE` — base64-encoded Developer ID Application `.p12`;
+- `APPLE_CERTIFICATE_PASSWORD` — the password used when exporting that `.p12`;
+- `APPLE_SIGNING_IDENTITY` — the complete Developer ID Application identity;
+- `APPLE_TEAM_ID` — the Paper Robin Apple Developer Team ID.
+
+For notarization, the preferred non-personal credential is an App Store Connect
+API key. Configure:
+
+- `APPLE_API_ISSUER` — the App Store Connect issuer ID;
+- `APPLE_API_KEY` — the API key ID;
+- `APPLE_API_KEY_P8_BASE64` — the downloaded `.p8` encoded as a single-line
+  base64 value.
+
+The workflow also accepts `APPLE_ID` plus an app-specific `APPLE_PASSWORD`
+instead of those three API-key secrets. A Mac signed into Xcode does not make
+those local credentials available to GitHub-hosted runners.
+
+After completing the manual release-candidate checks below, create and push a
+tag matching the app version:
+
+```sh
+git tag -a v2026.8.6 -m "FIPS 2026.8.6"
+git push origin v2026.8.6
+```
+
+The workflow rejects a tag that does not match both `package.json` and
+`tauri.conf.json`. It publishes the release only after the notarized DMG passes
+all verification gates. A failed run does not create a public release.
+
 ## Release verification
 
 The tag workflow verifies:
@@ -102,9 +137,9 @@ The tag workflow verifies:
 - Intel and Apple Silicon slices in all three executables;
 - both embedded LaunchDaemon property lists;
 - Gatekeeper acceptance and stapled tickets for the app and DMG; and
-- a SHA-256 checksum uploaded with the draft GitHub release.
+- a SHA-256 checksum uploaded with the public GitHub release.
 
 Registration itself is an intentional manual release-candidate test because it
 changes the host's system background services. Test new install, approval,
 stop/start/restart, package migration, rollback, removal-with-data-preserved,
-and moving the app out of `/Applications` before publishing.
+and moving the app out of `/Applications` before pushing the release tag.
