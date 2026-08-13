@@ -1,6 +1,6 @@
 {
   "name": "fips-mac",
-  "version": "2026.8.6",
+  "version": "2026.8.13",
   "description": "The native macOS app for running and managing a FIPS node.",
   "type": "module",
   "scripts": {

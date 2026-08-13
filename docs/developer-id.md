@@ -119,8 +119,8 @@ After completing the manual release-candidate checks below, create and push a
 tag matching the app version:
 
 ```sh
-git tag -a v2026.8.6 -m "FIPS 2026.8.6"
-git push origin v2026.8.6
+git tag -a v2026.8.13 -m "FIPS 2026.8.13"
+git push origin v2026.8.13
 ```
 
 The workflow rejects a tag that does not match both `package.json` and

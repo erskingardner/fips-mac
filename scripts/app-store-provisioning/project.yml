@@ -15,10 +15,10 @@ targets:
     settings:
       base:
         CODE_SIGN_STYLE: Automatic
-        CURRENT_PROJECT_VERSION: 1
+        CURRENT_PROJECT_VERSION: 2
         DEVELOPMENT_TEAM: 8Z6Q2LZ77W
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
-        MARKETING_VERSION: 2026.8.6
+        MARKETING_VERSION: 2026.8.13
         PRODUCT_BUNDLE_IDENTIFIER: com.paper-robin.fips-mac
         PRODUCT_NAME: FIPS

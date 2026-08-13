@@ -1,6 +1,6 @@
 [package]
 name = "fips-mac-service"
-version = "2026.8.6"
+version = "2026.8.13"
 description = "Privileged lifecycle controller for the FIPS Mac app"
 authors = ["Paper Robin"]
 license = "AGPL-3.0-only"
