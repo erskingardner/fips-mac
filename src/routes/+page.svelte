@@ -16,7 +16,6 @@
     AppPreferences,
     ConfigSnapshot,
     InvokeError,
-    LanDiscoveryStatus,
     MonitorSnapshot,
     Peer,
     ServiceStatus,
@@ -88,11 +87,6 @@
   let developmentPath = $state("/var/run/fips/control.sock");
 
   const status = $derived((snapshot.status ?? {}) as Record<string, unknown>);
-  const lanDiscovery = $derived(
-    status.lan_discovery && typeof status.lan_discovery === "object"
-      ? (status.lan_discovery as LanDiscoveryStatus)
-      : null,
-  );
   const guidedLanIssue = $derived(guided ? lanDiscoveryIssue(guided) : null);
   const online = $derived(snapshot.health === "healthy" || snapshot.health === "degraded");
   const serviceLabel = $derived(
@@ -167,42 +161,6 @@
   function sparklines(): Record<string, unknown> {
     const value = status.sparklines;
     return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
-  }
-
-  function lanStateLabel(): string {
-    if (!lanDiscovery) return "Diagnostics unavailable";
-    if (lanDiscovery.state === "running") return "Running";
-    if (lanDiscovery.state === "disabled") return "Disabled";
-    if (lanDiscovery.state === "failed") return "Failed";
-    return lanDiscovery.enabled ? "Unavailable" : "Disabled";
-  }
-
-  function lanStateClass(): string {
-    if (lanDiscovery?.state === "running" && !lanDiscovery.loopback_only) return "healthy";
-    if (lanDiscovery?.state === "disabled") return "stopped";
-    return "degraded";
-  }
-
-  function lanBindingLabel(): string {
-    const bindings = lanDiscovery?.udp_bindings ?? [];
-    if (!bindings.length) return "No UDP listener";
-    return bindings
-      .map((binding) => binding.bind_addr ?? binding.name ?? "UDP")
-      .join(", ");
-  }
-
-  function lanSkipReasons(): Array<{ label: string; value: number }> {
-    const counters = lanDiscovery?.counters ?? {};
-    return [
-      { label: "Own advertisement", value: counters.skipped_own_advert ?? 0 },
-      { label: "Scope mismatch", value: counters.skipped_scope_mismatch ?? 0 },
-      { label: "Missing npub", value: counters.skipped_missing_npub ?? 0 },
-      { label: "Unusable address", value: counters.skipped_unusable_address ?? 0 },
-      { label: "No compatible UDP", value: counters.skipped_no_compatible_udp ?? 0 },
-      { label: "Invalid npub", value: counters.skipped_invalid_npub ?? 0 },
-      { label: "Duplicate candidate", value: counters.skipped_duplicate_peer ?? 0 },
-      { label: "Already connected", value: counters.skipped_connected_or_connecting ?? 0 },
-    ].filter((reason) => reason.value > 0);
   }
 
   async function refreshOverview() {
@@ -548,9 +506,7 @@
           applyMessage = "The apply is still pending. FIPS will keep showing daemon health as it reconnects.";
         }
       } else {
-        applyMessage = result.activation === "hot_peers"
-          ? "Peer configuration applied without restarting FIPS."
-          : "Configuration saved. No runtime restart was needed.";
+        applyMessage = "Configuration saved. No runtime restart was needed.";
       }
       config = null;
       validation = null;
@@ -566,14 +522,14 @@
 
   async function resetConfig() {
     if (!config || applyBusy) return;
-    if (!window.confirm(`Stop using ${config.managed_path} and restore the untouched operator configuration? FIPS will restart.`)) return;
+    if (!window.confirm("Restore the initial configuration imported or created when FIPS was installed? FIPS will restart.")) return;
     applyBusy = true;
     try {
       const result = await invoke<ApplyResult>("reset_config", { expectedRevision: config.revision });
-      applyMessage = "Restoring the operator configuration and restarting FIPS…";
+      applyMessage = "Restoring the initial configuration and restarting FIPS…";
       const status = await waitForApply(result.apply_id);
       applyMessage = status?.state === "applied"
-        ? "The operator configuration is active again."
+        ? "The initial app-managed configuration is active again."
         : "Reset requested. Monitoring will resume when FIPS reconnects.";
       config = null;
       await loadConfig(true);
@@ -754,16 +710,6 @@
           <article><div><span>LIVE TRANSPORTS</span><strong>{number(status.transport_count)}</strong></div><div class="transport-dots">{#each transports.slice(0, 5) as transport}<i title={transport.type ?? "transport"}></i>{/each}</div></article>
         </section>
 
-        {#if lanDiscovery}
-          <button class="lan-summary" onclick={() => selectView("transports")}>
-            <span class="mini-dot {lanDiscovery.state === 'running' && !lanDiscovery.loopback_only ? 'running' : ''}"></span>
-            <span><strong>LAN discovery</strong><small>{lanDiscovery.loopback_only ? "UDP is only reachable from this Mac" : `${lanStateLabel()} · ${lanBindingLabel()}`}</small></span>
-            <span><b>{number(lanDiscovery.counters?.candidate_addresses)}</b><small>peer candidates</small></span>
-            <span><b>{number(lanDiscovery.counters?.handshakes_started)}</b><small>handshakes</small></span>
-            <i>View diagnostics →</i>
-          </button>
-        {/if}
-
         <section class="dashboard-grid">
           <article class="panel traffic-panel">
             <div class="panel-title"><div><span>TRAFFIC & QUALITY</span><h3>Last 30 seconds</h3></div><span class="legend"><i></i> In <i></i> Out</span></div>
@@ -817,32 +763,6 @@
           </aside>
         {/if}
       {:else if activeView === "transports"}
-        {#if lanDiscovery}
-          <section class="lan-diagnostics">
-            <div class="lan-diagnostics-head">
-              <div><span>LAN DISCOVERY</span><h2>Local mDNS rendezvous</h2><p>{text(lanDiscovery.service_type)}{lanDiscovery.scope ? ` · scope ${lanDiscovery.scope}` : ""}</p></div>
-              <span class="pill {lanStateClass()}">{lanStateLabel()}</span>
-            </div>
-            <div class="diagnostic-metrics">
-              <div><span>UDP LISTENER</span><strong>{lanBindingLabel()}</strong></div>
-              <div><span>ADVERTISED PORT</span><strong>{lanDiscovery.advertised_port ?? "—"}</strong></div>
-              <div><span>SERVICES RESOLVED</span><strong>{number(lanDiscovery.counters?.services_resolved)}</strong></div>
-              <div><span>CANDIDATES</span><strong>{number(lanDiscovery.counters?.candidate_addresses)}</strong></div>
-              <div><span>HANDSHAKES</span><strong>{number(lanDiscovery.counters?.handshakes_started)}</strong></div>
-              <div><span>START FAILURES</span><strong>{number(lanDiscovery.counters?.handshake_start_failures)}</strong></div>
-            </div>
-            {#if lanDiscovery.warnings?.length}
-              <div class="diagnostic-warning"><strong>Configuration issue</strong>{#each lanDiscovery.warnings as warning}<p>{warning}</p>{/each}<button onclick={() => selectView("settings")}>Open Settings</button></div>
-            {:else if lanDiscovery.state === "running" && number(lanDiscovery.counters?.candidate_addresses) === 0}
-              <p class="diagnostic-note">The browser is running but has not produced a dialable peer candidate. Check that the other node has LAN discovery enabled and that macOS allows multicast and incoming UDP.</p>
-            {/if}
-            {#if lanSkipReasons().length}
-              <div class="skip-reasons"><span>FILTERED EVENTS</span>{#each lanSkipReasons() as reason}<span><b>{reason.value}</b> {reason.label}</span>{/each}</div>
-            {/if}
-          </section>
-        {:else}
-          <section class="lan-diagnostics unsupported"><div><span>LAN DISCOVERY</span><h2>Runtime diagnostics unavailable</h2><p>This FIPS daemon predates discovery diagnostics. Monitoring and configuration continue to work normally.</p></div></section>
-        {/if}
         <section class="transport-grid">
           {#each transports as transport}
             <article class="panel transport-card">
@@ -880,10 +800,10 @@
           <div class="node-settings-heading"><span>NODE CONFIGURATION</span><p>Configure identity, networking, discovery, transports, and persistent peers.</p></div>
           {#if configLoading}<div class="panel loading">Loading daemon configuration…</div>
           {:else if configError && !config}
-            <article class="panel upgrade-card"><div class="upgrade-icon">↑</div><h2>Configuration controls unavailable</h2><p>{configError}</p><p class="muted">Status and peer monitoring continue to work with older FIPS releases.</p><button onclick={() => loadConfig(true)}>Try again</button></article>
+            <article class="panel upgrade-card"><div class="upgrade-icon">↑</div><h2>Configuration controls unavailable</h2><p>{configError}</p><p class="muted">Package-managed FIPS nodes remain fully monitorable. Migrate the node into this app to edit its configuration here.</p><button onclick={() => loadConfig(true)}>Try again</button></article>
           {:else if config && guided}
             <div class="settings-header">
-              <div><span>ACTIVE SOURCE</span><strong>{config.source === "managed" ? "Managed by FIPS" : "Operator configuration"}</strong><code>{config.source === "managed" ? config.managed_path : config.base_path}</code></div>
+              <div><span>ACTIVE SOURCE</span><strong>Managed by this app</strong><code>{config.managed_path}</code></div>
               <div class="segmented"><button class:active={settingsMode === "guided"} onclick={() => (settingsMode = "guided")}>Guided</button><button class:active={settingsMode === "yaml"} onclick={() => (settingsMode = "yaml")}>Advanced YAML</button></div>
             </div>
 
@@ -934,7 +854,7 @@
                 </div>
               </div>
             {:else}
-              <div class="yaml-panel settings-form"><div class="form-title"><span>ADVANCED YAML</span><h2>Complete macOS configuration</h2><p>Every daemon key is available here. Secret sentinels preserve existing values without revealing them.</p></div><textarea aria-label="FIPS YAML configuration" spellcheck="false" bind:value={draftYaml} oninput={syncYamlToGuided}></textarea><div class="editor-footer"><code>{draftYaml.length.toLocaleString()} / 131,072 bytes</code><span>node.control settings are read-only in managed mode</span></div></div>
+              <div class="yaml-panel settings-form"><div class="form-title"><span>ADVANCED YAML</span><h2>Complete macOS configuration</h2><p>Every daemon key is available here. Secret sentinels preserve existing values without revealing them.</p></div><textarea aria-label="FIPS YAML configuration" spellcheck="false" bind:value={draftYaml} oninput={syncYamlToGuided}></textarea><div class="editor-footer"><code>{draftYaml.length.toLocaleString()} / 131,072 bytes</code><span>node.control settings are fixed for app-managed nodes</span></div></div>
             {/if}
 
             {#if draftError}<div class="inline-error">{draftError}</div>{/if}
@@ -943,15 +863,15 @@
 
             {#if validation}
               <section class="review-panel">
-                <div class="review-head"><div><span>{validation.valid ? "REVIEW CHANGES" : "VALIDATION ERRORS"}</span><h2>{validation.valid ? `${validation.diff.length} semantic change${validation.diff.length === 1 ? "" : "s"}` : "Configuration needs attention"}</h2></div>{#if validation.activation}<span class="impact {validation.activation}">{validation.activation === "restart" ? "Daemon restart" : validation.activation === "hot_peers" ? "Live peer update" : "No runtime change"}</span>{/if}</div>
+                <div class="review-head"><div><span>{validation.valid ? "REVIEW CHANGES" : "VALIDATION ERRORS"}</span><h2>{validation.valid ? `${validation.diff.length} semantic change${validation.diff.length === 1 ? "" : "s"}` : "Configuration needs attention"}</h2></div>{#if validation.activation}<span class="impact {validation.activation}">{validation.activation === "restart" ? "Daemon restart" : "No runtime change"}</span>{/if}</div>
                 {#if validation.errors.length}<div class="validation-errors">{#each validation.errors as error}<div><code>{error.path}</code><p>{error.message}</p></div>{/each}</div>{/if}
                 {#if validation.warnings.length}<div class="warnings">{#each validation.warnings as warning}<p>⚠ {warning}</p>{/each}</div>{/if}
-                {#if validation.valid}<div class="diff-list">{#each validation.diff as change}<div><code>{change.path || "/"}</code><span><del>{formatDiffValue(change.before)}</del><b>→</b><ins>{formatDiffValue(change.after)}</ins></span></div>{:else}<p class="muted">Only formatting changed. The managed file will be updated without restarting FIPS.</p>{/each}</div>{/if}
+                {#if validation.valid}<div class="diff-list">{#each validation.diff as change}<div><code>{change.path || "/"}</code><span><del>{formatDiffValue(change.before)}</del><b>→</b><ins>{formatDiffValue(change.after)}</ins></span></div>{:else}<p class="muted">Only formatting changed. The app-owned file will be updated without restarting FIPS.</p>{/each}</div>{/if}
               </section>
             {/if}
 
             <div class="settings-actions">
-              <button class="danger-text" disabled={applyBusy || config.source !== "managed"} onclick={resetConfig}>Restore operator file</button>
+              <button class="danger-text" disabled={applyBusy} onclick={resetConfig}>Restore initial configuration</button>
               <span></span>
               <button class="settings-action" disabled={applyBusy} onclick={() => { draftYaml = config!.yaml; guided = readGuidedDraft(draftYaml); validation = null; }}>Discard changes</button>
               {#if validation?.valid}<button class="primary settings-action" disabled={applyBusy} onclick={applyDraft}>{applyBusy ? "Applying…" : "Apply configuration"}</button>{:else}<button class="primary settings-action" disabled={applyBusy || !!draftError} onclick={reviewConfig}>{validation ? "Validate again" : "Review changes"}</button>{/if}
@@ -1061,14 +981,13 @@
   .metrics { display: grid; gap: 16px; padding-top: 14px; border-top: 1px solid #1d3029; }.metrics.four { grid-template-columns: repeat(4,1fr); }.metrics div { display: flex; flex-direction: column; gap: 5px; }.metrics span,.quality-row>span { color: #586e65; font-size: 8px; font-weight: 700; letter-spacing: .13em; }.metrics strong { font-size: 12px; font-weight: 570; }
   .tun-card { display: flex; min-width: 0; flex-direction: column; }.tun-name { margin: 24px 0 3px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 25px; font-weight: 500; }.tun-card>p { color: #62776e; font-size: 10px; }.tun-route { min-width: 0; margin-top: auto; padding-top: 15px; border-top: 1px solid #1d3029; }.tun-route span { display: block; margin-bottom: 4px; color: #53685f; font-size: 8px; text-transform: uppercase; letter-spacing: .12em; }.tun-route code { display: block; max-width: 100%; overflow-wrap: anywhere; line-height: 1.45; word-break: break-word; }
   .stat-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 11px; margin-top: 12px; }.stat-grid article { min-width: 0; display: flex; align-items: flex-end; justify-content: space-between; padding: 13px 14px; }.stat-grid article>div:first-child { display: flex; flex-direction: column; gap: 5px; }.stat-grid span { color: #536a61; font-size: 7px; font-weight: 700; letter-spacing: .11em; }.stat-grid strong { font-size: 21px; font-weight: 540; }.stat-grid svg { width: 45%; height: 31px; overflow: visible; }.stat-grid polyline,.traffic-chart polyline { fill: none; stroke: #48dba6; stroke-width: 1.7; vector-effect: non-scaling-stroke; }.transport-dots { display: flex; gap: 4px; padding-bottom: 5px; }.transport-dots i { width: 5px; height: 5px; border-radius: 50%; background: #4bdca7; }
-  .lan-summary { display: grid; grid-template-columns: 9px minmax(200px,1fr) auto auto auto; gap: 12px; align-items: center; width: 100%; margin-top: 12px; padding: 10px 3px; border-width: 1px 0; border-radius: 0; border-color: #1b3028; background: transparent; text-align: left; }.lan-summary:hover:not(:disabled) { border-color: #27483b; background: rgba(19,38,31,.45); }.lan-summary>span { display: flex; flex-direction: column; gap: 2px; }.lan-summary strong { font-size: 10.5px; }.lan-summary b { font-size: 11px; font-weight: 600; }.lan-summary small { color: #60766d; font-size: 8.5px; }.lan-summary>i { color: #64b899; font-size: 9px; font-style: normal; }
   .dashboard-grid { display: grid; grid-template-columns: minmax(0,1.45fr) minmax(245px,.75fr); gap: 13px; margin-top: 12px; }.panel { padding: 17px 18px; }.panel-title h3 { margin: 5px 0 0; font-size: 13px; font-weight: 540; }.legend { color: #5d726a; font-size: 8px; }.legend i { display: inline-block; width: 7px; height: 2px; margin: 0 4px 2px 9px; background: #48dba6; }.legend i:nth-child(2) { background: #51766b; }
   .traffic-chart { width: 100%; height: 80px; margin: 13px 0 5px; overflow: visible; }.traffic-chart line { stroke: #1d3029; stroke-width: .5; }.traffic-chart .bytes-out { stroke: #52796d; }.quality-row { display: flex; align-items: center; gap: 10px; }.quality-row strong { font-size: 9px; }.quality-track { flex: 1; height: 3px; border-radius: 4px; background: #1d3029; overflow: hidden; }.quality-track i { display: block; height: 100%; background: #e4b75d; }
   .text-button,.danger-text { padding: 0; border: 0; color: #5dcba3; background: transparent; font-size: 9px; }.compact-peer { display: grid; grid-template-columns: 31px 1fr 8px; align-items: center; gap: 10px; width: 100%; padding: 8px 0; border: 0; border-radius: 0; border-top: 1px solid #192b24; background: transparent; text-align: left; }.compact-peer:first-of-type { margin-top: 10px; }.compact-peer span:nth-child(2) { display: flex; flex-direction: column; gap: 2px; min-width: 0; }.compact-peer strong { overflow: hidden; font-size: 10px; text-overflow: ellipsis; }.compact-peer small { color: #586d65; font-size: 8px; }.peer-avatar,.peer-cell>i { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; color: #67dab0; background: #193027; font-size: 10px; font-style: normal; font-weight: 700; }.peer-avatar.large { width: 50px; height: 50px; margin: 16px 0 12px; border-radius: 14px; font-size: 17px; }.empty-mini { padding: 25px 0; color: #60756d; text-align: center; font-size: 10px; }
   .table-panel { padding: 0; overflow: hidden; }.table-panel>.panel-title { padding: 18px 19px; }.data-table { border-top: 1px solid #1c2d27; }.table-head,.table-row { display: grid; grid-template-columns: 1.7fr .65fr .6fr 1.1fr .72fr; gap: 15px; align-items: center; padding: 10px 18px; }.table-head { color: #52675f; background: #0b1713; font-size: 8px; font-weight: 700; letter-spacing: .12em; }.table-row { width: 100%; border: 0; border-bottom: 1px solid #182a23; border-radius: 0; color: #81968e; background: transparent; text-align: left; font-size: 10px; }.table-row:hover,.table-row.selected { background: #11221b; }.table-row code { overflow: hidden; color: #789087; text-overflow: ellipsis; }.peer-cell { display: flex; align-items: center; gap: 10px; min-width: 0; }.peer-cell>span { display: flex; flex-direction: column; min-width: 0; }.peer-cell strong,.peer-cell small { overflow: hidden; text-overflow: ellipsis; }.peer-cell strong { color: #dbe9e3; font-size: 10px; }.peer-cell small { color: #51665e; font-size: 8px; }.transport-tag { color: #5bd6a9; font-size: 8px; text-transform: uppercase; }.table-row>span:last-child { display: flex; align-items: center; gap: 7px; }
   .empty { min-height: 300px; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #71867e; text-align: center; }.empty h3 { margin: 8px 0; color: #d7e8e1; font-size: 14px; }.empty p { max-width: 340px; font-size: 11px; }.empty-icon { display: grid; place-items: center; width: 52px; height: 52px; border: 1px solid #243a32; border-radius: 50%; color: #4bd6a3; background: #102119; font-size: 21px; }
   .detail-drawer { position: fixed; z-index: 5; top: 88px; right: 0; bottom: 0; width: 315px; padding: 24px; border-left: 1px solid #24372f; background: #0c1814; box-shadow: -20px 0 50px rgba(0,0,0,.28); }.drawer-close { position: absolute; top: 15px; right: 15px; border: 0; background: transparent; color: #71857e; font-size: 20px; }.detail-drawer h2 { margin: 0 0 3px; font-size: 17px; }.detail-drawer>code { display: block; overflow-wrap: anywhere; color: #5b7168; font-size: 8px; }.detail-drawer dl,.transport-card dl { margin: 25px 0; }.detail-drawer dl div,.transport-card dl div { display: grid; grid-template-columns: 1fr 1.3fr; gap: 8px; padding: 9px 0; border-bottom: 1px solid #1b2d26; font-size: 10px; }.detail-drawer dt,.transport-card dt { color: #566b63; }.detail-drawer dd,.transport-card dd { margin: 0; overflow-wrap: anywhere; color: #a8bbb4; text-align: right; }.danger { width: 100%; border-color: #53342e; color: #e58576; background: #241512; }
-  .lan-diagnostics { margin-bottom: 18px; padding: 2px 0 16px; border-bottom: 1px solid #22382f; }.lan-diagnostics-head { display: flex; align-items: flex-start; justify-content: space-between; }.lan-diagnostics-head>div>span,.lan-diagnostics.unsupported>div>span,.skip-reasons>span:first-child { color: #61776e; font-size: 9px; font-weight: 700; letter-spacing: .16em; }.lan-diagnostics h2 { margin: 5px 0 4px; font-size: 17px; font-weight: 580; }.lan-diagnostics-head p,.lan-diagnostics.unsupported p { margin: 0; color: #647a71; font-size: 10px; }.diagnostic-metrics { display: grid; grid-template-columns: minmax(170px,1.8fr) repeat(5,minmax(75px,1fr)); gap: 18px; margin-top: 17px; padding: 13px 0; border-top: 1px solid #1b3028; border-bottom: 1px solid #1b3028; }.diagnostic-metrics>div { min-width: 0; display: flex; flex-direction: column; gap: 5px; }.diagnostic-metrics span { color: #536a61; font-size: 7.5px; font-weight: 700; letter-spacing: .1em; }.diagnostic-metrics strong { overflow: hidden; font-size: 11px; font-weight: 570; text-overflow: ellipsis; white-space: nowrap; }.diagnostic-warning { position: relative; margin-top: 13px; padding: 2px 120px 2px 12px; border-left: 2px solid #d6a955; color: #d9b66f; }.diagnostic-warning strong { font-size: 10.5px; }.diagnostic-warning p,.diagnostic-note { margin: 4px 0 0; color: #9b8760; font-size: 10px; line-height: 1.45; }.diagnostic-warning button { position: absolute; top: 1px; right: 0; padding: 6px 9px; font-size: 9px; }.diagnostic-note { color: #73877f; }.skip-reasons { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 12px; color: #73877f; font-size: 9px; }.skip-reasons>span:first-child { margin-right: 3px; }.skip-reasons b { color: #a5b9b1; }.lan-diagnostics.unsupported { padding-top: 2px; }.transport-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 13px; }.transport-card { display: grid; grid-template-columns: 43px 1fr; gap: 15px; }.transport-icon { display: grid; place-items: center; width: 43px; height: 43px; border: 1px solid #284039; border-radius: 9px; color: #54d9a8; background: #10211b; }.transport-title { grid-column: 2; }.transport-title span:first-child { color: #5bd7aa; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .13em; }.transport-title h3 { margin: 5px 0; font-size: 13px; }.transport-card dl { grid-column: 1 / -1; margin-bottom: 0; }
+  .transport-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 13px; }.transport-card { display: grid; grid-template-columns: 43px 1fr; gap: 15px; }.transport-icon { display: grid; place-items: center; width: 43px; height: 43px; border: 1px solid #284039; border-radius: 9px; color: #54d9a8; background: #10211b; }.transport-title { grid-column: 2; }.transport-title span:first-child { color: #5bd7aa; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .13em; }.transport-title h3 { margin: 5px 0; font-size: 13px; }.transport-card dl { grid-column: 1 / -1; margin-bottom: 0; }
   .settings-shell { max-width: 940px; margin: 0 auto; }.settings-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; padding: 0 0 15px; border-bottom: 1px solid #1b3028; }.settings-header>div:first-child { display: flex; min-width: 0; flex-direction: column; gap: 3px; }.settings-header strong { font-size: 13px; font-weight: 590; }.settings-header code { overflow: hidden; color: #60766d; font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }.segmented { display: flex; flex: 0 0 auto; padding: 3px; border: 1px solid #20332b; border-radius: 7px; background: #091511; }.segmented button { padding: 6px 10px; border: 0; background: transparent; font-size: 10.5px; }.segmented button.active { color: #dff8ee; background: #183027; }
   .application-settings { margin-bottom: 25px; padding-bottom: 22px; border-bottom: 1px solid #20342c; }.application-title { display: flex; align-items: flex-start; justify-content: space-between; }.ownership-badge { flex: 0 0 auto; margin-top: 4px; padding: 5px 8px; border-radius: 20px; color: #78c9aa; background: #132a21; font-size: 9px; }.application-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 24px; }.installation-row { display: flex; align-items: center; justify-content: space-between; min-height: 59px; border-top: 1px solid #192b24; border-bottom: 1px solid #192b24; }.installation-row>div:first-child { display: flex; min-width: 0; flex-direction: column; gap: 4px; }.installation-row strong { font-size: 12px; }.installation-row small { max-width: 610px; overflow: hidden; color: #6b8078; font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }.node-settings-heading { display: flex; align-items: baseline; gap: 13px; margin-bottom: 15px; }.node-settings-heading>span { color: #61776e; font-size: 9px; font-weight: 700; letter-spacing: .16em; }.node-settings-heading p { margin: 0; color: #60756d; font-size: 10.5px; }
   .settings-layout { display: grid; grid-template-columns: 188px minmax(0,1fr); gap: 0; }.settings-nav { align-self: start; padding: 3px 20px 3px 0; border-right: 1px solid #1a2d26; }.settings-nav button { padding: 10px 11px; border-radius: 6px; font-size: 12px; line-height: 1.25; }.settings-nav button.active { color: #e9fff7; background: #13251e; }.settings-nav button em { font-size: 10.5px; }.settings-form { min-width: 0; min-height: 392px; padding: 3px 0 28px 28px; }.form-title { margin-bottom: 14px; padding-bottom: 15px; border-bottom: 1px solid #1d3029; }.form-title h2 { margin: 5px 0 6px; font-size: 18px; font-weight: 580; letter-spacing: -.01em; }.form-title p,.modal>p { max-width: 620px; margin: 0; color: #71867e; font-size: 11.5px; line-height: 1.5; }.toggle-row { position: relative; display: flex; align-items: center; justify-content: space-between; min-height: 59px; padding: 11px 0; border-bottom: 1px solid #192b24; cursor: pointer; }.toggle-row>span { display: flex; flex-direction: column; gap: 4px; }.toggle-row strong { font-size: 12px; font-weight: 580; }.toggle-row small { color: #6b8078; font-size: 10.5px; line-height: 1.35; }.toggle-row input { position: absolute; opacity: 0; }.toggle-row>i { position: relative; width: 31px; height: 17px; border-radius: 20px; background: #263630; transition: .2s; }.toggle-row>i::after { content: ""; position: absolute; top: 3px; left: 3px; width: 11px; height: 11px; border-radius: 50%; background: #778981; transition: .2s; }.toggle-row input:checked+i { background: #2c765d; }.toggle-row input:checked+i::after { left: 17px; background: #69e2b6; }.toggle-row.compact { min-height: 40px; border: 0; }.field { display: flex; flex-direction: column; gap: 6px; margin-top: 14px; }.field>span { color: #7a8f87; font-size: 10.5px; font-weight: 600; }.field input,.field select,.path-field input { width: 100%; height: 36px; padding: 0 10px; border: 1px solid #263a32; border-radius: 6px; outline: 0; color: #c8d9d2; background: #091511; font-size: 11.5px; }.field input:focus,.field select:focus,.path-field input:focus,textarea:focus { border-color: #378a6b; }.field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }.info-box { margin-top: 18px; padding: 3px 0 3px 12px; border-left: 2px solid #2f6652; color: #789087; font-size: 10.5px; line-height: 1.5; }.inline-warning { display: flex; align-items: center; gap: 14px; margin: 10px 0; padding: 10px 0 10px 12px; border-left: 2px solid #d3a651; }.inline-warning>div { min-width: 0; flex: 1; }.inline-warning strong { color: #e3bd72; font-size: 10.5px; }.inline-warning p { margin: 3px 0 0; color: #9a855e; font-size: 10px; line-height: 1.4; }.inline-warning button { flex: 0 0 auto; padding: 6px 9px; color: #dfbc76; font-size: 9px; }.transport-setting { margin: 0; padding: 0 0 15px; border-bottom: 1px solid #1d3029; }.transport-setting + .transport-setting { margin-top: 2px; }

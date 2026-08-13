@@ -45,13 +45,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: erskingardner/fips
-          ref: 3e7a0afbe45b3a475ab7b90edc1f5fab4494418a
+          ref: ba161eadb79a782c08278b0af2d2b641b445518a
           path: fips
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fips
-      - name: Test managed configuration contract
+      - name: Test bundled FIPS compatibility contract
         working-directory: fips-mac
         env:
           FIPS_CHECKOUT_PATH: ${{ github.workspace }}/fips

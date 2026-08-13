@@ -1,12 +1,20 @@
 //! Privileged lifecycle controller bundled with FIPS for Mac.
 //!
-//! This is intentionally independent of the FIPS crate. It accepts a small,
-//! fixed NDJSON protocol over a local Unix socket and only manages the two
-//! known launchd jobs: the FIPS Mac app's bundled node and the legacy FIPS package.
+//! It accepts a small, fixed NDJSON protocol over a local Unix socket and
+//! manages only the two known launchd jobs plus the app-owned configuration.
+//! It links the exact pinned FIPS crate solely to validate configuration with
+//! the same types as the bundled node.
+
+#[cfg(target_os = "macos")]
+mod config_manager;
 
 #[cfg(target_os = "macos")]
 mod macos {
+    use crate::config_manager::{
+        ApplyActivation, ConfigManager, redact_message_secrets, validation_error_path,
+    };
     use serde::{Deserialize, Serialize};
+    use serde_json::{Value, json};
     use std::{
         ffi::CString,
         fs::{self, File, OpenOptions},
@@ -43,36 +51,38 @@ mod macos {
 
     const APP_CONFIG_DIR: &str = "/Library/Application Support/FIPS";
     const APP_CONFIG: &str = "/Library/Application Support/FIPS/fips.yaml";
-    const APP_MANAGED_CONFIG: &str = "/Library/Application Support/FIPS/fips-monitor.yaml";
+    const APP_LEGACY_MANAGED_CONFIG: &str = "/Library/Application Support/FIPS/fips-monitor.yaml";
     const APP_STATE_DIR: &str = "/Library/Application Support/FIPS";
     const APP_STATE_PATH: &str = "/Library/Application Support/FIPS/service-state.json";
     const APP_LOG_DIR: &str = "/Library/Logs/FIPS";
     const RESOLVER_DIR: &str = "/etc/resolver";
     const RESOLVER_PATH: &str = "/etc/resolver/fips";
 
-    const REQUEST_LIMIT: usize = 4 * 1024;
+    const REQUEST_LIMIT: usize = 256 * 1024;
     const IO_TIMEOUT: Duration = Duration::from_secs(12);
 
     #[derive(Debug, Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Request {
         command: String,
+        #[serde(default)]
+        params: Option<Value>,
     }
 
     #[derive(Debug, Serialize)]
     struct Response {
         status: &'static str,
         #[serde(skip_serializing_if = "Option::is_none")]
-        data: Option<ServiceStatus>,
+        data: Option<Value>,
         #[serde(skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     }
 
     impl Response {
-        fn ok(data: ServiceStatus) -> Self {
+        fn ok(data: impl Serialize) -> Self {
             Self {
                 status: "ok",
-                data: Some(data),
+                data: serde_json::to_value(data).ok(),
                 message: None,
             }
         }
@@ -84,6 +94,28 @@ mod macos {
                 message: Some(message.into()),
             }
         }
+
+        fn is_ok(&self) -> bool {
+            self.status == "ok"
+        }
+    }
+
+    struct DispatchOutcome {
+        response: Response,
+        activation: Option<ApplyActivation>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ConfigDraftParams {
+        expected_revision: String,
+        yaml: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct ConfigResetParams {
+        expected_revision: String,
     }
 
     #[derive(Debug, Clone, Serialize)]
@@ -216,34 +248,60 @@ mod macos {
         )
         .await;
 
-        let response = match read {
-            Err(_) => Response::error("request timed out"),
-            Ok(Err(error)) => Response::error(format!("could not read request: {error}")),
+        let mut outcome = match read {
+            Err(_) => DispatchOutcome::error("request timed out"),
+            Ok(Err(error)) => DispatchOutcome::error(format!("could not read request: {error}")),
             Ok(Ok(_)) if request_line.len() > REQUEST_LIMIT => {
-                Response::error("request exceeds 4 KiB limit")
+                DispatchOutcome::error("request exceeds 256 KiB limit")
             }
-            Ok(Ok(0)) => Response::error("empty request"),
+            Ok(Ok(0)) => DispatchOutcome::error("empty request"),
             Ok(Ok(_)) => match serde_json::from_slice::<Request>(&request_line) {
-                Ok(request) => {
-                    let _guard = operation_lock.lock().await;
-                    dispatch(&request.command).await
-                }
-                Err(error) => Response::error(format!("invalid request: {error}")),
+                Ok(request) => dispatch(&request, operation_lock.clone()).await,
+                Err(error) => DispatchOutcome::error(format!("invalid request: {error}")),
             },
         };
 
-        let mut encoded = serde_json::to_vec(&response)
+        let mut encoded = serde_json::to_vec(&outcome.response)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         encoded.push(b'\n');
         timeout(IO_TIMEOUT, writer.write_all(&encoded))
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "response timed out"))??;
-        writer.shutdown().await
+        writer.shutdown().await?;
+        if outcome.response.is_ok()
+            && let Some(activation) = outcome.activation.take()
+        {
+            tokio::spawn(async move {
+                let _guard = operation_lock.lock().await;
+                activate_config(activation).await;
+            });
+        }
+        Ok(())
     }
 
-    async fn dispatch(command: &str) -> Response {
-        let result = match command {
-            "show_service" => service_status().await,
+    impl DispatchOutcome {
+        fn response(response: Response) -> Self {
+            Self {
+                response,
+                activation: None,
+            }
+        }
+
+        fn error(message: impl Into<String>) -> Self {
+            Self::response(Response::error(message))
+        }
+    }
+
+    async fn dispatch(request: &Request, operation_lock: Arc<Mutex<()>>) -> DispatchOutcome {
+        match request.command.as_str() {
+            "show_service" => return lifecycle_response(service_status().await),
+            "show_config" => return config_snapshot(),
+            "show_config_apply" => return show_config_apply(),
+            _ => {}
+        }
+
+        let _guard = operation_lock.lock().await;
+        let result = match request.command.as_str() {
             "prepare_install" => prepare_install().await,
             "migrate" => migrate().await,
             "finish_migration" => finish_migration().await,
@@ -253,11 +311,258 @@ mod macos {
             "stop" => stop_service().await,
             "restart" => restart_service().await,
             "remove_keep_data" => remove_keep_data().await,
-            _ => return Response::error(format!("unknown command: {command}")),
+            "validate_config" => return validate_config(request),
+            "apply_config" => return apply_config(request).await,
+            "reset_managed_config" => return reset_config(request).await,
+            _ => {
+                return DispatchOutcome::error(format!("unknown command: {}", request.command));
+            }
         };
+        lifecycle_response(result)
+    }
+
+    fn lifecycle_response(result: Result<ServiceStatus, String>) -> DispatchOutcome {
         match result {
-            Ok(status) => Response::ok(status),
-            Err(error) => Response::error(error),
+            Ok(status) => DispatchOutcome::response(Response::ok(status)),
+            Err(error) => DispatchOutcome::error(error),
+        }
+    }
+
+    fn require_app_managed() -> Result<(), String> {
+        let state = read_state()?;
+        if state.ownership != "app_managed" {
+            return Err(
+                "Configuration editing is available after FIPS is installed or migrated into this app. Package-managed nodes remain monitor-only."
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    async fn require_exclusive_app_ownership() -> Result<(), String> {
+        let state = read_state()?;
+        match ownership(&state).await? {
+            Ownership::AppManaged => Ok(()),
+            Ownership::Conflict => Err(
+                "Configuration cannot be changed while app-managed and package-managed FIPS services conflict. Repair the installation first."
+                    .into(),
+            ),
+            _ => Err(
+                "Configuration editing is available only for a node managed by this app."
+                    .into(),
+            ),
+        }
+    }
+
+    fn config_manager() -> ConfigManager {
+        ConfigManager::new(PathBuf::from(APP_CONFIG))
+    }
+
+    fn config_snapshot() -> DispatchOutcome {
+        let result = require_app_managed().and_then(|()| config_manager().snapshot());
+        match result {
+            Ok(snapshot) => DispatchOutcome::response(Response::ok(snapshot)),
+            Err(error) => DispatchOutcome::error(error),
+        }
+    }
+
+    fn show_config_apply() -> DispatchOutcome {
+        let result = require_app_managed().map(|()| config_manager().last_apply());
+        match result {
+            Ok(apply) => DispatchOutcome::response(Response::ok(apply)),
+            Err(error) => DispatchOutcome::error(error),
+        }
+    }
+
+    fn parse_params<T: for<'de> Deserialize<'de>>(request: &Request) -> Result<T, String> {
+        serde_json::from_value(request.params.clone().unwrap_or(Value::Null))
+            .map_err(|error| format!("invalid {} parameters: {error}", request.command))
+    }
+
+    fn validate_config(request: &Request) -> DispatchOutcome {
+        let result: Result<Value, String> = (|| {
+            require_app_managed()?;
+            let params: ConfigDraftParams = parse_params(request)?;
+            let manager = config_manager();
+            match manager.validate(&params.expected_revision, &params.yaml) {
+                Ok(validated) => Ok(json!({
+                    "valid": true,
+                    "errors": [],
+                    "warnings": [],
+                    "yaml": validated.redacted_yaml,
+                    "diff": validated.diff,
+                    "activation": validated.activation,
+                })),
+                Err(error) => Ok(json!({
+                    "valid": false,
+                    "errors": [{
+                        "path": validation_error_path(&error),
+                        "message": redact_message_secrets(
+                            &manager.redact_error_message(&error),
+                            &params.yaml,
+                        ),
+                    }],
+                    "warnings": [],
+                    "yaml": params.yaml,
+                    "diff": [],
+                    "activation": "none",
+                })),
+            }
+        })();
+        match result {
+            Ok(value) => DispatchOutcome::response(Response::ok(value)),
+            Err(error) => DispatchOutcome::error(error),
+        }
+    }
+
+    async fn apply_config(request: &Request) -> DispatchOutcome {
+        let result: Result<_, String> = async {
+            require_exclusive_app_ownership().await?;
+            let params: ConfigDraftParams = parse_params(request)?;
+            let manager = config_manager();
+            match manager.apply(&params.expected_revision, &params.yaml) {
+                Ok((result, _)) => Ok(result),
+                Err(error) => Err(redact_message_secrets(
+                    &manager.redact_error_message(&error),
+                    &params.yaml,
+                )),
+            }
+        }
+        .await;
+        match result {
+            Ok(result) => DispatchOutcome {
+                activation: Some(result.activation),
+                response: Response::ok(result),
+            },
+            Err(error) => DispatchOutcome::error(error),
+        }
+    }
+
+    async fn reset_config(request: &Request) -> DispatchOutcome {
+        let result: Result<_, String> = async {
+            require_exclusive_app_ownership().await?;
+            let params: ConfigResetParams = parse_params(request)?;
+            config_manager().reset(&params.expected_revision)
+        }
+        .await;
+        match result {
+            Ok(result) => DispatchOutcome {
+                activation: Some(result.activation),
+                response: Response::ok(result),
+            },
+            Err(error) => DispatchOutcome::error(error),
+        }
+    }
+
+    async fn activate_config(activation: ApplyActivation) {
+        let manager = config_manager();
+        if activation == ApplyActivation::None {
+            if let Err(error) = sync_dns_resolver(false) {
+                let _ = manager.mark_failed(manager.redact_error_message(&error));
+            } else {
+                let _ = manager.mark_applied();
+            }
+            return;
+        }
+
+        let state = match read_state() {
+            Ok(state) => state,
+            Err(error) => {
+                let _ = manager.rollback_pending(manager.redact_error_message(&error));
+                return;
+            }
+        };
+        match ownership(&state).await {
+            Ok(Ownership::AppManaged) => {}
+            Ok(_) => {
+                let _ = manager.rollback_pending(
+                    "configuration activation was cancelled because this app no longer owns FIPS",
+                );
+                return;
+            }
+            Err(error) => {
+                let _ = manager.rollback_pending(manager.redact_error_message(&error));
+                return;
+            }
+        }
+
+        let launch = match launch_status(APP_LABEL, APP_TARGET).await {
+            Ok(status) => status,
+            Err(error) => {
+                let _ = manager.rollback_pending(manager.redact_error_message(&error));
+                return;
+            }
+        };
+        if !state.enabled || !launch.running {
+            // A semantic draft is persisted but cannot be called active until
+            // the next successful node start proves the runtime configuration.
+            return;
+        }
+
+        let activation_result = async {
+            restart_target(APP_LABEL, APP_TARGET, None).await?;
+            wait_for_control_ready().await?;
+            sync_dns_resolver(state.migrated_from_legacy)?;
+            Ok::<(), String>(())
+        }
+        .await;
+        match activation_result {
+            Ok(()) => {
+                let _ = manager.mark_applied();
+            }
+            Err(error) => {
+                let redacted = manager.redact_error_message(&error);
+                if manager.rollback_pending(redacted.clone()).unwrap_or(false) {
+                    let restored = async {
+                        restart_target(APP_LABEL, APP_TARGET, None).await?;
+                        wait_for_control_ready().await?;
+                        sync_dns_resolver(state.migrated_from_legacy)?;
+                        Ok::<(), String>(())
+                    }
+                    .await;
+                    if let Err(restore_error) = restored {
+                        let combined = format!(
+                            "{redacted}; the previous configuration was restored but failed to restart: {}",
+                            manager.redact_error_message(&restore_error)
+                        );
+                        let _ = manager.mark_failed(combined);
+                    }
+                }
+            }
+        }
+    }
+
+    async fn wait_for_control_ready() -> Result<(), String> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let ready = async {
+                let mut stream = UnixStream::connect(CONTROL_SOCKET).await.ok()?;
+                stream
+                    .write_all(b"{\"command\":\"show_status\"}\n")
+                    .await
+                    .ok()?;
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                timeout(Duration::from_secs(1), reader.read_line(&mut line))
+                    .await
+                    .ok()?
+                    .ok()?;
+                serde_json::from_str::<Value>(&line)
+                    .ok()?
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .is_some_and(|status| status == "ok")
+                    .then_some(())
+            }
+            .await;
+            if ready.is_some() {
+                secure_control_paths();
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err("FIPS did not open its control socket within 20 seconds".into());
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
     }
 
@@ -381,7 +686,7 @@ mod macos {
         match ownership(&read_state()?).await? {
             Ownership::AppManaged => {
                 update_enabled(true)?;
-                start_target(APP_LABEL, APP_TARGET, None).await?;
+                activate_app_service(false).await?;
             }
             Ownership::External => {
                 start_target(LEGACY_LABEL, LEGACY_TARGET, Some(LEGACY_PLIST)).await?;
@@ -415,7 +720,7 @@ mod macos {
         match ownership(&read_state()?).await? {
             Ownership::AppManaged => {
                 update_enabled(true)?;
-                restart_target(APP_LABEL, APP_TARGET, None).await?;
+                activate_app_service(true).await?;
             }
             Ownership::External => {
                 restart_target(LEGACY_LABEL, LEGACY_TARGET, Some(LEGACY_PLIST)).await?;
@@ -426,6 +731,37 @@ mod macos {
             Ownership::None => return Err("FIPS is not installed.".into()),
         }
         service_status().await
+    }
+
+    async fn activate_app_service(restart: bool) -> Result<(), String> {
+        let manager = config_manager();
+        let state = read_state()?;
+        let result = async {
+            if restart {
+                restart_target(APP_LABEL, APP_TARGET, None).await?;
+            } else {
+                start_target(APP_LABEL, APP_TARGET, None).await?;
+            }
+            wait_for_control_ready().await?;
+            sync_dns_resolver(state.migrated_from_legacy)?;
+            Ok::<(), String>(())
+        }
+        .await;
+        match result {
+            Ok(()) => manager.mark_applied(),
+            Err(error) => {
+                let redacted = manager.redact_error_message(&error);
+                if manager.rollback_pending(redacted.clone()).unwrap_or(false) {
+                    restart_target(APP_LABEL, APP_TARGET, None).await?;
+                    wait_for_control_ready().await?;
+                    sync_dns_resolver(state.migrated_from_legacy)?;
+                    return Err(format!(
+                        "The new configuration could not start and was rolled back: {redacted}"
+                    ));
+                }
+                Err(redacted)
+            }
+        }
     }
 
     async fn remove_keep_data() -> Result<ServiceStatus, String> {
@@ -535,7 +871,7 @@ mod macos {
             ),
         };
         Ok(ServiceStatus {
-            controller_version: 2,
+            controller_version: 3,
             state: if status.running { "running" } else { "stopped" },
             enabled: if owner == Ownership::AppManaged {
                 state.enabled && status.enabled
@@ -719,11 +1055,17 @@ mod macos {
         }
         if !Path::new(APP_CONFIG).exists() {
             let default = bundled_contents_dir()?.join("Resources/fips.default.yaml");
-            copy_regular_file(&default, Path::new(APP_CONFIG), 0o640)?;
+            copy_regular_file(&default, Path::new(APP_CONFIG), 0o600)?;
+        } else {
+            require_root_regular_file(Path::new(APP_CONFIG))?;
+            set_admin_permissions(Path::new(APP_CONFIG), 0o600).map_err(|e| e.to_string())?;
         }
-        if Path::new(APP_MANAGED_CONFIG).exists() {
-            require_root_regular_file(Path::new(APP_MANAGED_CONFIG))?;
+        if Path::new(APP_LEGACY_MANAGED_CONFIG).exists() {
+            require_root_regular_file(Path::new(APP_LEGACY_MANAGED_CONFIG))?;
+            set_admin_permissions(Path::new(APP_LEGACY_MANAGED_CONFIG), 0o600)
+                .map_err(|e| e.to_string())?;
         }
+        config_manager().bootstrap(Some(Path::new(APP_LEGACY_MANAGED_CONFIG)))?;
         Ok(())
     }
 
@@ -923,11 +1265,7 @@ mod macos {
     }
 
     fn sync_dns_resolver(allow_legacy_resolver: bool) -> Result<bool, String> {
-        let config_path = if Path::new(APP_MANAGED_CONFIG).is_file() {
-            Path::new(APP_MANAGED_CONFIG)
-        } else {
-            Path::new(APP_CONFIG)
-        };
+        let config_path = Path::new(APP_CONFIG);
         if !config_path.exists() {
             return Ok(false);
         }

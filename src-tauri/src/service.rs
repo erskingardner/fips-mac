@@ -13,7 +13,7 @@ const APP_CONTROL_SOCKET: &str = "/var/run/fips/control.sock";
 const CONTROLLER_PLIST: &str = "com.paper-robin.fips-mac.service-control.plist";
 const NODE_PLIST: &str = "com.paper-robin.fips-mac.node.plist";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(12);
-const MAX_RESPONSE_BYTES: u64 = 16 * 1024;
+const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServiceStatus {
@@ -187,7 +187,30 @@ impl ServiceClient {
     }
 
     pub async fn command(&self, command: &str) -> Result<ServiceStatus, ServiceError> {
-        let mut request = serde_json::to_vec(&json!({ "command": command }))
+        let payload = self.request(command, None).await?;
+        let status = serde_json::from_value::<WireStatus>(payload).map_err(|error| {
+            ServiceError::new(
+                "protocol",
+                format!("invalid service status payload: {error}"),
+            )
+        })?;
+        Ok(status.into())
+    }
+
+    async fn query(&self, command: &str) -> Result<Value, ServiceError> {
+        self.request(command, None).await
+    }
+
+    async fn query_with_params(&self, command: &str, params: Value) -> Result<Value, ServiceError> {
+        self.request(command, Some(params)).await
+    }
+
+    async fn request(&self, command: &str, params: Option<Value>) -> Result<Value, ServiceError> {
+        let envelope = match params {
+            Some(params) => json!({ "command": command, "params": params }),
+            None => json!({ "command": command }),
+        };
+        let mut request = serde_json::to_vec(&envelope)
             .map_err(|error| ServiceError::new("protocol", error.to_string()))?;
         request.push(b'\n');
 
@@ -220,7 +243,7 @@ impl ServiceClient {
         if read as u64 > MAX_RESPONSE_BYTES {
             return Err(ServiceError::new(
                 "protocol",
-                "service controller response exceeded 16 KiB",
+                "service controller response exceeded 1 MiB",
             ));
         }
 
@@ -228,18 +251,7 @@ impl ServiceClient {
             ServiceError::new("protocol", format!("invalid service response: {error}"))
         })?;
         match response.get("status").and_then(Value::as_str) {
-            Some("ok") => {
-                let status = serde_json::from_value::<WireStatus>(
-                    response.get("data").cloned().unwrap_or(Value::Null),
-                )
-                .map_err(|error| {
-                    ServiceError::new(
-                        "protocol",
-                        format!("invalid service status payload: {error}"),
-                    )
-                })?;
-                Ok(status.into())
-            }
+            Some("ok") => Ok(response.get("data").cloned().unwrap_or(Value::Null)),
             Some("error") => Err(ServiceError::new(
                 "service",
                 response
@@ -580,6 +592,84 @@ pub async fn restart_fips_service(
     perform_service_action(&state, "restart").await
 }
 
+#[tauri::command]
+pub async fn get_config(state: State<'_, crate::AppState>) -> Result<Value, ServiceError> {
+    ServiceClient::new(state.service_socket_path.clone())
+        .query("show_config")
+        .await
+}
+
+#[tauri::command]
+pub async fn validate_config(
+    state: State<'_, crate::AppState>,
+    expected_revision: String,
+    yaml: String,
+) -> Result<Value, ServiceError> {
+    ServiceClient::new(state.service_socket_path.clone())
+        .query_with_params(
+            "validate_config",
+            json!({ "expected_revision": expected_revision, "yaml": yaml }),
+        )
+        .await
+}
+
+async fn mutate_config(
+    state: &crate::AppState,
+    command: &str,
+    params: Value,
+) -> Result<Value, ServiceError> {
+    if state
+        .service_action_busy
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err(ServiceError::new(
+            "busy",
+            "Another FIPS service or configuration operation is already in progress.",
+        ));
+    }
+    let result = ServiceClient::new(state.service_socket_path.clone())
+        .query_with_params(command, params)
+        .await;
+    state.service_action_busy.store(false, Ordering::Release);
+    state.refresh.notify_one();
+    result
+}
+
+#[tauri::command]
+pub async fn apply_config(
+    state: State<'_, crate::AppState>,
+    expected_revision: String,
+    yaml: String,
+) -> Result<Value, ServiceError> {
+    mutate_config(
+        &state,
+        "apply_config",
+        json!({ "expected_revision": expected_revision, "yaml": yaml }),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn get_apply_status(state: State<'_, crate::AppState>) -> Result<Value, ServiceError> {
+    ServiceClient::new(state.service_socket_path.clone())
+        .query("show_config_apply")
+        .await
+}
+
+#[tauri::command]
+pub async fn reset_config(
+    state: State<'_, crate::AppState>,
+    expected_revision: String,
+) -> Result<Value, ServiceError> {
+    mutate_config(
+        &state,
+        "reset_managed_config",
+        json!({ "expected_revision": expected_revision }),
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -631,5 +721,37 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.kind, "timeout");
+    }
+
+    #[tokio::test]
+    async fn sends_configuration_payloads_to_the_service_controller() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("service.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut line = String::new();
+            BufReader::new(&mut stream)
+                .read_line(&mut line)
+                .await
+                .unwrap();
+            let request: Value = serde_json::from_str(line.trim()).unwrap();
+            assert_eq!(request["command"], "validate_config");
+            assert_eq!(request["params"]["expected_revision"], "abc123");
+            assert_eq!(request["params"]["yaml"], "node: {}\n");
+            stream
+                .write_all(b"{\"status\":\"ok\",\"data\":{\"valid\":true}}\n")
+                .await
+                .unwrap();
+        });
+
+        let response = ServiceClient::new(path)
+            .query_with_params(
+                "validate_config",
+                json!({ "expected_revision": "abc123", "yaml": "node: {}\n" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response["valid"], true);
     }
 }

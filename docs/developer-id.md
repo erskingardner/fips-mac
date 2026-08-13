@@ -44,6 +44,15 @@ When the app-managed configuration enables DNS, the controller maintains
 only a file carrying FIPS's marker, except when migration adopts the
 exact resolver file installed by the existing FIPS package.
 
+The same controller owns configuration safety rather than requiring a custom
+FIPS daemon build. It keeps the initial and last-known-good YAML beside
+`fips.yaml`, redacts identity and Tor password values before returning drafts,
+requires an expected revision for writes, validates with the exact pinned FIPS
+config types, and uses atomic `0600` replacements. Semantic changes restart
+the node only after the apply response is flushed. If the control socket does
+not return, the controller restores the last-known-good file and restarts it.
+Package-managed configurations remain monitor-only until migration.
+
 Removing the app-managed node unregisters both services but preserves identity
 and configuration. It never silently deletes operator data.
 

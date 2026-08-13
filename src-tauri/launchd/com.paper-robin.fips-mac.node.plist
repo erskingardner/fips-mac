@@ -13,8 +13,6 @@
     <string>fips</string>
     <string>--config</string>
     <string>/Library/Application Support/FIPS/fips.yaml</string>
-    <string>--managed-config</string>
-    <string>/Library/Application Support/FIPS/fips-monitor.yaml</string>
   </array>
 
   <key>SpawnConstraint</key>

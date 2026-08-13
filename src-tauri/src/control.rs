@@ -198,66 +198,6 @@ pub async fn disconnect_peer(
 }
 
 #[tauri::command]
-pub async fn get_config(state: State<'_, crate::AppState>) -> Result<Value, ClientError> {
-    client(&state)
-        .query("show_config")
-        .await
-        .map_err(upgrade_error)
-}
-
-#[tauri::command]
-pub async fn validate_config(
-    state: State<'_, crate::AppState>,
-    expected_revision: String,
-    yaml: String,
-) -> Result<Value, ClientError> {
-    client(&state)
-        .query_with_params(
-            "validate_config",
-            json!({ "expected_revision": expected_revision, "yaml": yaml }),
-        )
-        .await
-        .map_err(upgrade_error)
-}
-
-#[tauri::command]
-pub async fn apply_config(
-    state: State<'_, crate::AppState>,
-    expected_revision: String,
-    yaml: String,
-) -> Result<Value, ClientError> {
-    client(&state)
-        .query_with_params(
-            "apply_config",
-            json!({ "expected_revision": expected_revision, "yaml": yaml }),
-        )
-        .await
-        .map_err(upgrade_error)
-}
-
-#[tauri::command]
-pub async fn get_apply_status(state: State<'_, crate::AppState>) -> Result<Value, ClientError> {
-    client(&state)
-        .query("show_config_apply")
-        .await
-        .map_err(upgrade_error)
-}
-
-#[tauri::command]
-pub async fn reset_config(
-    state: State<'_, crate::AppState>,
-    expected_revision: String,
-) -> Result<Value, ClientError> {
-    client(&state)
-        .query_with_params(
-            "reset_managed_config",
-            json!({ "expected_revision": expected_revision }),
-        )
-        .await
-        .map_err(upgrade_error)
-}
-
-#[tauri::command]
 pub async fn set_socket_path(
     state: State<'_, crate::AppState>,
     socket_path: String,
@@ -277,14 +217,6 @@ pub async fn set_socket_path(
 #[tauri::command]
 pub fn refresh_now(state: State<'_, crate::AppState>) {
     state.refresh.notify_one();
-}
-
-fn upgrade_error(mut error: ClientError) -> ClientError {
-    if error.kind == "daemon" && error.message.starts_with("unknown command:") {
-        error.kind = "upgrade_required".into();
-        error.message = "This FIPS daemon can be monitored, but it must be upgraded before its configuration can be changed.".into();
-    }
-    error
 }
 
 #[cfg(test)]

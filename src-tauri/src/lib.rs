@@ -111,28 +111,6 @@ fn classify_status(status: &Value) -> (&'static str, String) {
             format!("The node is running, but TUN is {tun_state}."),
         );
     }
-    if let Some(lan) = object.get("lan_discovery").and_then(Value::as_object)
-        && lan.get("enabled").and_then(Value::as_bool) == Some(true)
-    {
-        if let Some(warning) = lan
-            .get("warnings")
-            .and_then(Value::as_array)
-            .and_then(|warnings| warnings.first())
-            .and_then(Value::as_str)
-        {
-            return ("degraded", warning.to_string());
-        }
-        let discovery_state = lan
-            .get("state")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        if !discovery_state.eq_ignore_ascii_case("running") {
-            return (
-                "degraded",
-                format!("LAN discovery is enabled, but its runtime is {discovery_state}."),
-            );
-        }
-    }
     ("healthy", "The FIPS node is running normally.".into())
 }
 
@@ -176,19 +154,17 @@ async fn collect_snapshot(path: PathBuf, service_path: PathBuf) -> MonitorSnapsh
     match client.query("show_status").await {
         Ok(status) => {
             let (health, detail) = classify_status(&status);
-            let capabilities = client.query("show_capabilities").await.ok();
-            let configuration_supported = capabilities
-                .as_ref()
-                .and_then(|value| value.get("config_api_version"))
-                .and_then(Value::as_u64)
-                .is_some_and(|version| version >= 1);
+            let configuration_supported = service.ownership == "app_managed"
+                && service
+                    .controller_version
+                    .is_some_and(|version| version >= 3);
             MonitorSnapshot {
                 health: health.into(),
                 detail,
                 socket_path: client.socket_path().display().to_string(),
                 checked_at_ms: now_ms(),
                 status: Some(status),
-                capabilities,
+                capabilities: None,
                 configuration_supported,
                 service,
             }
@@ -601,11 +577,11 @@ pub fn run() {
             control::get_transports,
             control::connect_peer,
             control::disconnect_peer,
-            control::get_config,
-            control::validate_config,
-            control::apply_config,
-            control::get_apply_status,
-            control::reset_config,
+            service::get_config,
+            service::validate_config,
+            service::apply_config,
+            service::get_apply_status,
+            service::reset_config,
             control::set_socket_path,
             control::refresh_now,
             service::set_fips_service_running,
@@ -663,29 +639,6 @@ mod tests {
             "degraded"
         );
         assert_eq!(classify_status(&json!({"state": "Starting"})).0, "degraded");
-        assert_eq!(
-            classify_status(&json!({
-                "state": "Running",
-                "lan_discovery": {
-                    "enabled": true,
-                    "state": "running",
-                    "warnings": ["LAN discovery is loopback-only"]
-                }
-            })),
-            ("degraded", "LAN discovery is loopback-only".to_string())
-        );
-        assert_eq!(
-            classify_status(&json!({
-                "state": "Running",
-                "lan_discovery": {
-                    "enabled": true,
-                    "state": "running",
-                    "warnings": []
-                }
-            }))
-            .0,
-            "healthy"
-        );
         assert_eq!(classify_status(&Value::Null).0, "incompatible");
     }
 

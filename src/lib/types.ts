@@ -38,33 +38,6 @@ export interface MonitorSnapshot {
   service: ServiceStatus;
 }
 
-export interface LanDiscoveryCounters {
-  services_resolved?: number;
-  candidate_addresses?: number;
-  handshakes_started?: number;
-  handshake_start_failures?: number;
-  skipped_own_advert?: number;
-  skipped_missing_npub?: number;
-  skipped_scope_mismatch?: number;
-  skipped_unusable_address?: number;
-  skipped_no_compatible_udp?: number;
-  skipped_invalid_npub?: number;
-  skipped_duplicate_peer?: number;
-  skipped_connected_or_connecting?: number;
-}
-
-export interface LanDiscoveryStatus {
-  enabled?: boolean;
-  state?: "disabled" | "running" | "failed" | "unavailable";
-  service_type?: string;
-  scope?: string | null;
-  advertised_port?: number | null;
-  udp_bindings?: Array<{ name?: string; bind_addr?: string; outbound_only?: boolean }>;
-  loopback_only?: boolean;
-  warnings?: string[];
-  counters?: LanDiscoveryCounters;
-}
-
 export interface Peer {
   npub?: string;
   display_name?: string;
@@ -115,13 +88,13 @@ export interface ValidationResult {
   yaml?: string;
   diff: ConfigDiff[];
   warnings: string[];
-  activation: "none" | "hot_peers" | "restart" | null;
+  activation: "none" | "restart" | null;
 }
 
 export interface ApplyResult {
   apply_id: string;
   revision: string;
-  activation: "none" | "hot_peers" | "restart";
+  activation: "none" | "restart";
   diff: ConfigDiff[];
 }
 

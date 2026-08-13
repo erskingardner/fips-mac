@@ -11,6 +11,8 @@ if [ ! -f "$FIPS_DIR/Cargo.toml" ]; then
   exit 1
 fi
 
-cargo test --manifest-path "$FIPS_DIR/Cargo.toml" config::manager::tests -- --nocapture
-cargo test --manifest-path "$FIPS_DIR/Cargo.toml" --test managed_config_integration -- --nocapture
+cargo test --manifest-path "$FIPS_DIR/Cargo.toml" --lib control::protocol::tests -- --nocapture
+cargo test --manifest-path "$FIPS_DIR/Cargo.toml" --lib control::queries::tests::snapshot_show_status -- --nocapture
+cargo test --manifest-path "$FIPS_DIR/Cargo.toml" --lib control::queries::tests::snapshot_show_peers -- --nocapture
+cargo test --manifest-path "$FIPS_DIR/Cargo.toml" --lib control::queries::tests::snapshot_show_transports -- --nocapture
 cargo check --manifest-path "$FIPS_DIR/Cargo.toml" --bin fips --bin fipsctl

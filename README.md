@@ -28,9 +28,10 @@ App Switcher icon and may choose to open the dashboard at launch.
 - Reports node health, identity, version, uptime, mesh address, and TUN state.
 - Lists peers and transports with connection and quality details.
 - Supports confirmed peer connect and disconnect actions.
-- Shows LAN discovery diagnostics and actionable configuration warnings.
-- Provides guided settings and an advanced YAML editor backed by FIPS's
-  revisioned, redacted configuration API.
+- Shows actionable warnings when LAN discovery is enabled without a reachable
+  UDP listener.
+- Provides guided settings and an advanced YAML editor backed by the app's
+  revisioned, redacted configuration manager.
 - Reviews semantic changes and activation impact before applying them.
 - Tracks live applies, daemon restarts, failures, and automatic rollbacks.
 - Installs a safe-default FIPS node through macOS 13's Background Items flow.
@@ -50,18 +51,20 @@ Tauri IPC.
 The node and lifecycle sockets are `/var/run/fips/control.sock` and
 `/var/run/fips-mac/service.sock`. App-managed installations grant local
 administrators access without creating a new Unix group or requiring a new
-login session. The root lifecycle service is owned by FIPS, accepts
-only fixed status/install/migrate/repair/start/stop/restart/remove operations,
-and never accepts a client-supplied executable, path, launchd label, or shell
-argument.
+login session. The root lifecycle service is owned by FIPS, accepts only fixed
+lifecycle and configuration operations, and never accepts a client-supplied
+executable, filesystem path, launchd label, or shell argument. It validates
+app-managed YAML with the pinned FIPS config types, preserves redacted secrets,
+rejects stale revisions, writes atomically, and rolls back a failed restart.
 
 The bundled node is built without source changes from the exact revision in
 [`fips-source-revision`](fips-source-revision). Both it and the lifecycle
 service remain inside the signed application bundle and are registered using
 Apple's `SMAppService`; nothing is copied into `/usr/local/bin` or
-`/Library/LaunchDaemons`. App-managed configuration lives in
-`/Library/Application Support/FIPS` and is preserved when the service is
-removed. See [Developer ID distribution](docs/developer-id.md) and
+`/Library/LaunchDaemons`. App-managed configuration lives at
+`/Library/Application Support/FIPS/fips.yaml`; its initial and last-known-good
+copies and apply journal stay beside it with mode `0600`. Configuration is
+preserved when the service is removed. See [Developer ID distribution](docs/developer-id.md) and
 [third-party notices](THIRD_PARTY_NOTICES.md).
 
 The legacy Mac App Store build is isolated from the direct-download build. It enables
@@ -190,8 +193,9 @@ files, the firewall, Linux gateway configuration, automatic updates, or iOS.
 Only the Developer ID edition provides the one-app node installation. A future
 Mac App Store/TestFlight edition would require a separate Network Extension
 architecture; the root LaunchDaemon is intentionally not presented as an App
-Store-compatible design. Older external daemons remain monitorable and the
-Settings view explains when an upgrade is required.
+Store-compatible design. Package-managed daemons remain monitorable. Their
+configuration stays untouched and becomes editable only after the user
+explicitly migrates the node into the app.
 
 ## License
 

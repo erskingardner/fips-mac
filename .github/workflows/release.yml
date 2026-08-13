@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: erskingardner/fips
-          ref: 3e7a0afbe45b3a475ab7b90edc1f5fab4494418a
+          ref: ba161eadb79a782c08278b0af2d2b641b445518a
           path: fips-source
       - uses: oven-sh/setup-bun@v2
         with:

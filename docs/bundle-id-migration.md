@@ -16,7 +16,7 @@ App ID before building that distribution. Existing development installations
 that registered the former background-service labels should remove the old
 development build's service before installing this build.
 
-`/usr/local/etc/fips/fips-monitor.yaml` and the corresponding app-managed
-filename are FIPS configuration-protocol compatibility paths, not product
-branding. They should remain unchanged unless FIPS itself defines and ships a
-configuration migration.
+An older app-managed `/Library/Application Support/FIPS/fips-monitor.yaml` is
+recognized only as a one-time migration input. New installations use the
+single app-owned `/Library/Application Support/FIPS/fips.yaml`; FIPS itself is
+launched without a managed-config overlay.
