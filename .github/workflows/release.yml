@@ -78,6 +78,9 @@ jobs:
             printf '%s' "$APPLE_API_KEY_P8_BASE64" | openssl base64 -d -A -out "$key_path"
             chmod 0600 "$key_path"
             echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+            echo "NOTARIZATION_MODE=api-key" >> "$GITHUB_ENV"
+          else
+            echo "NOTARIZATION_MODE=apple-id" >> "$GITHUB_ENV"
           fi
       - name: Verify notarization credentials with Apple
         shell: bash
@@ -117,7 +120,7 @@ jobs:
       - run: cargo test --manifest-path src-tauri/Cargo.toml
       - run: cargo test --manifest-path src-tauri/service/Cargo.toml
       - name: Build signed and notarized universal DMG with API key
-        if: ${{ secrets.APPLE_API_KEY_P8_BASE64 != '' }}
+        if: ${{ env.NOTARIZATION_MODE == 'api-key' }}
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -127,7 +130,7 @@ jobs:
           FIPS_CHECKOUT_PATH: ${{ github.workspace }}/fips-source
         run: bun run tauri:build:developer-id --bundles dmg
       - name: Build signed and notarized universal DMG with Apple ID
-        if: ${{ secrets.APPLE_API_KEY_P8_BASE64 == '' }}
+        if: ${{ env.NOTARIZATION_MODE == 'apple-id' }}
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
