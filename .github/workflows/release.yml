@@ -79,6 +79,29 @@ jobs:
             chmod 0600 "$key_path"
             echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
           fi
+      - name: Verify notarization credentials with Apple
+        shell: bash
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${APPLE_API_KEY_PATH:-}" ]]; then
+            xcrun notarytool history \
+              --key "$APPLE_API_KEY_PATH" \
+              --key-id "$APPLE_API_KEY" \
+              --issuer "$APPLE_API_ISSUER" \
+              --output-format json >/dev/null
+          else
+            xcrun notarytool history \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" \
+              --output-format json >/dev/null
+          fi
       - run: bun install --frozen-lockfile
       - name: Verify tag matches the application version
         shell: bash
