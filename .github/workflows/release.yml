@@ -110,11 +110,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tag_version="${GITHUB_REF_NAME#v}"
           package_version="$(bun -e 'console.log(require("./package.json").version)')"
           tauri_version="$(bun -e 'console.log(require("./src-tauri/tauri.conf.json").version)')"
-          test "$tag_version" = "$package_version"
-          test "$tag_version" = "$tauri_version"
+          bundle_version="$(bun -e 'console.log(require("./src-tauri/tauri.conf.json").bundle.macOS.bundleVersion)')"
+          expected_tag="v${package_version}-build.${bundle_version}"
+          test "$package_version" = "$tauri_version"
+          test "$GITHUB_REF_NAME" = "$expected_tag"
       - run: bun run check
       - run: bun run test
       - run: cargo test --manifest-path src-tauri/Cargo.toml

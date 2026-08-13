@@ -116,16 +116,18 @@ instead of those three API-key secrets. A Mac signed into Xcode does not make
 those local credentials available to GitHub-hosted runners.
 
 After completing the manual release-candidate checks below, create and push a
-tag matching the app version:
+tag containing both the marketing version and monotonically increasing macOS
+build number:
 
 ```sh
-git tag -a v2026.8.13 -m "FIPS 2026.8.13"
-git push origin v2026.8.13
+git tag -a v2026.8.13-build.3 -m "FIPS 2026.8.13 (build 3)"
+git push origin v2026.8.13-build.3
 ```
 
-The workflow rejects a tag that does not match both `package.json` and
-`tauri.conf.json`. It publishes the release only after the notarized DMG passes
-all verification gates. A failed run does not create a public release.
+The workflow rejects a tag that does not match the version in `package.json`
+and `tauri.conf.json` or the `bundleVersion` in `tauri.conf.json`. It publishes
+the release only after the notarized DMG passes all verification gates. A
+failed run does not create a public release.
 
 ## Release verification
 

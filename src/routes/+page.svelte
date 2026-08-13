@@ -68,8 +68,8 @@
   let installMessage = $state("");
   let pendingInstallAction = $state<"install" | "migrate" | "existing">("install");
   let preferences = $state<AppPreferences>({
-    show_dock_icon: false,
-    open_dashboard_at_launch: false,
+    show_dock_icon: true,
+    open_dashboard_at_launch: true,
   });
   let toast = $state("");
 

@@ -274,11 +274,17 @@ fn health_label(health: &str) -> &'static str {
 }
 
 pub(crate) fn show_window(app: &AppHandle, section: &str) {
+    restore_window(app);
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.emit("app://navigate", section);
+    }
+}
+
+fn restore_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
-        let _ = window.emit("app://navigate", section);
     }
 }
 
@@ -614,12 +620,8 @@ pub fn run() {
         .expect("error while building FIPS")
         .run(|app, event| {
             #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::Reopen {
-                has_visible_windows: false,
-                ..
-            } = event
-            {
-                show_window(app, "overview");
+            if let tauri::RunEvent::Reopen { .. } = event {
+                restore_window(app);
             }
             #[cfg(not(target_os = "macos"))]
             let _ = (app, event);

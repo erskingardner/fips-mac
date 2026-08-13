@@ -3,12 +3,32 @@ use std::{fs, path::PathBuf};
 use tauri::{AppHandle, Manager};
 
 const PREFERENCES_FILE: &str = "preferences.json";
+const LEGACY_IDENTIFIER: &str = "com.paper-robin.fips-monitor";
+const CURRENT_PREFERENCES_VERSION: u8 = 1;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct AppPreferences {
+    #[serde(default = "visible_by_default")]
     pub show_dock_icon: bool,
+    #[serde(default = "visible_by_default")]
     pub open_dashboard_at_launch: bool,
+    #[serde(default)]
+    preferences_version: u8,
+}
+
+const fn visible_by_default() -> bool {
+    true
+}
+
+impl Default for AppPreferences {
+    fn default() -> Self {
+        Self {
+            show_dock_icon: true,
+            open_dashboard_at_launch: true,
+            preferences_version: CURRENT_PREFERENCES_VERSION,
+        }
+    }
 }
 
 fn preferences_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -22,10 +42,40 @@ pub fn load(app: &AppHandle) -> AppPreferences {
     let Ok(path) = preferences_path(app) else {
         return AppPreferences::default();
     };
-    fs::read(path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+
+    let stored = fs::read(&path).ok().or_else(|| {
+        path.parent()
+            .and_then(std::path::Path::parent)
+            .map(|application_support| {
+                application_support
+                    .join(LEGACY_IDENTIFIER)
+                    .join(PREFERENCES_FILE)
+            })
+            .and_then(|legacy_path| fs::read(legacy_path).ok())
+    });
+    let preferences = stored
+        .and_then(|bytes| serde_json::from_slice::<AppPreferences>(&bytes).ok())
+        .unwrap_or_default();
+    let (preferences, migrated) = migrate(preferences);
+
+    // Before FIPS became a regular Mac app, both visibility options defaulted
+    // to false. Migrate that prerelease state so an existing installation
+    // cannot disappear into an inaccessible background-only process.
+    if migrated {
+        let _ = save(app, &preferences);
+    }
+
+    preferences
+}
+
+fn migrate(mut preferences: AppPreferences) -> (AppPreferences, bool) {
+    if preferences.preferences_version >= CURRENT_PREFERENCES_VERSION {
+        return (preferences, false);
+    }
+    preferences.show_dock_icon = true;
+    preferences.open_dashboard_at_launch = true;
+    preferences.preferences_version = CURRENT_PREFERENCES_VERSION;
+    (preferences, true)
 }
 
 fn save(app: &AppHandle, preferences: &AppPreferences) -> Result<(), String> {
@@ -74,6 +124,7 @@ pub fn set_app_preferences(
     let preferences = AppPreferences {
         show_dock_icon,
         open_dashboard_at_launch,
+        preferences_version: CURRENT_PREFERENCES_VERSION,
     };
     apply_dock_preference(&app, show_dock_icon)?;
     save(&app, &preferences)?;
@@ -88,14 +139,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn preferences_are_menu_bar_first_by_default() {
+    fn preferences_are_visible_by_default() {
         assert_eq!(
             AppPreferences::default(),
             AppPreferences {
-                show_dock_icon: false,
-                open_dashboard_at_launch: false,
+                show_dock_icon: true,
+                open_dashboard_at_launch: true,
+                preferences_version: CURRENT_PREFERENCES_VERSION,
             }
         );
+    }
+
+    #[test]
+    fn legacy_preferences_migrate_to_recoverable_visibility() {
+        let preferences = serde_json::from_str::<AppPreferences>(
+            r#"{"show_dock_icon":false,"open_dashboard_at_launch":false}"#,
+        )
+        .unwrap();
+        let (preferences, migrated) = migrate(preferences);
+
+        assert!(migrated);
+        assert!(preferences.show_dock_icon);
+        assert!(preferences.open_dashboard_at_launch);
+        assert_eq!(preferences.preferences_version, CURRENT_PREFERENCES_VERSION);
     }
 
     #[test]

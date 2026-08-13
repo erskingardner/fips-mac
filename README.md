@@ -10,10 +10,10 @@ edition includes a pinned universal FIPS executable, so a new user can install
 one app, approve its background service once, and manage the node without a
 package manager or Terminal.
 
-The app is built with Tauri 2, Rust, Svelte, TypeScript, Vite, and Bun. It is a
-menu-bar-first Mac app: healthy launches can stay in the menu bar, while the
-dashboard behaves like a full app when opened. Users may opt into a Dock and
-App Switcher icon and may choose to open the dashboard at launch.
+The app is built with Tauri 2, Rust, Svelte, TypeScript, Vite, and Bun. It opens
+as a regular Mac app by default, with its dashboard, Dock icon, App Switcher
+entry, and menu-bar control all available. Users who prefer a menu-bar-only app
+can hide the Dock icon and dashboard-at-launch behavior in Settings.
 
 ## Naming
 
@@ -164,12 +164,14 @@ service for Intel and Apple Silicon before Tauri signs the nested executables
 and app. Set `FIPS_CHECKOUT_PATH` only when FIPS is not available at `../fips`.
 The script refuses a different revision or tracked local changes.
 
-Tags matching `v*` build the universal Apple Silicon/Intel target and produce a
-signed, notarized DMG. The release workflow verifies all three executable
-signatures, Gatekeeper, stapling, launchd plists, and architecture slices before
-publishing a public GitHub release with generated release notes and a SHA-256
-checksum. See [Developer ID distribution](docs/developer-id.md) for the required
-repository secrets and release procedure.
+Release tags use `v<version>-build.<build>`, such as
+`v2026.8.13-build.3`. They build the universal Apple Silicon/Intel target and
+produce a signed, notarized DMG. The release workflow verifies all three
+executable signatures, Gatekeeper, stapling, launchd plists, and architecture
+slices before publishing a public GitHub release with generated release notes
+and a SHA-256 checksum. See
+[Developer ID distribution](docs/developer-id.md) for the required repository
+secrets and release procedure.
 
 For the separate monitor-only Mac App Store package, follow
 [docs/app-store.md](docs/app-store.md). App Store packaging uses a separate
@@ -187,6 +189,7 @@ builds.
 - `src-tauri/Entitlements.appstore.plist` — Mac App Store sandbox entitlements
 - `scripts/` — icon generation, FIPS contract smoke test, and App Store tooling
 - `docs/` — release and operational documentation
+- `CHANGELOG.md` — user-visible changes following Keep a Changelog
 
 ## Scope
 
