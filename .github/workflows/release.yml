@@ -116,13 +116,22 @@ jobs:
       - run: bun run test
       - run: cargo test --manifest-path src-tauri/Cargo.toml
       - run: cargo test --manifest-path src-tauri/service/Cargo.toml
-      - name: Build signed and notarized universal DMG
+      - name: Build signed and notarized universal DMG with API key
+        if: ${{ secrets.APPLE_API_KEY_P8_BASE64 != '' }}
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          FIPS_CHECKOUT_PATH: ${{ github.workspace }}/fips-source
+        run: bun run tauri:build:developer-id --bundles dmg
+      - name: Build signed and notarized universal DMG with Apple ID
+        if: ${{ secrets.APPLE_API_KEY_P8_BASE64 == '' }}
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
