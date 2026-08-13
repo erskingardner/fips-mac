@@ -1,17 +1,27 @@
-# FIPS Monitor
+# FIPS Mac
 
-[![CI](https://github.com/erskingardner/fips-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/erskingardner/fips-monitor/actions/workflows/ci.yml)
+[![CI](https://github.com/erskingardner/fips-mac/actions/workflows/ci.yml/badge.svg)](https://github.com/erskingardner/fips-mac/actions/workflows/ci.yml)
 [![License: AGPL v3](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 
-FIPS Monitor is a native macOS menu-bar companion for a local
-[FIPS](https://github.com/erskingardner/fips) node. It keeps the node's health,
-peers, transports, traffic, and mesh quality visible without requiring a
-terminal, and provides safe configuration editing when paired with a compatible
-FIPS daemon.
+FIPS Mac is the native Mac app for installing, running, and understanding a
+local [FIPS](https://github.com/erskingardner/fips) node. It appears as **FIPS**
+in Finder, the Dock, the App Switcher, the menu bar, and macOS settings. The Developer ID
+edition includes a pinned universal FIPS executable, so a new user can install
+one app, approve its background service once, and manage the node without a
+package manager or Terminal.
 
 The app is built with Tauri 2, Rust, Svelte, TypeScript, Vite, and Bun. It is a
-macOS accessory app: healthy launches stay in the menu bar, while the dashboard
-and onboarding appear when requested or when the local node needs attention.
+menu-bar-first Mac app: healthy launches can stay in the menu bar, while the
+dashboard behaves like a full app when opened. Users may opt into a Dock and
+App Switcher icon and may choose to open the dashboard at launch.
+
+## Naming
+
+- **FIPS Mac** is the repository and project name.
+- **FIPS** is the user-facing application name everywhere on macOS.
+- `com.paper-robin.fips-mac` is the bundle identifier. Signing, entitlements,
+  Service Management labels, and App Store tooling use it consistently. See
+  [the bundle-ID migration record](docs/bundle-id-migration.md).
 
 ## What it does
 
@@ -23,6 +33,11 @@ and onboarding appear when requested or when the local node needs attention.
   revisioned, redacted configuration API.
 - Reviews semantic changes and activation impact before applying them.
 - Tracks live applies, daemon restarts, failures, and automatic rollbacks.
+- Installs a safe-default FIPS node through macOS 13's Background Items flow.
+- Starts, stops, and restarts FIPS from the dashboard or menu bar. Turning the
+  service off persists across restarts of the Mac.
+- Detects package-managed FIPS installations and supports either companion mode
+  or a rollback-safe migration that preserves configuration and identity.
 - Offers an opt-in Launch at Login menu item for direct-download builds.
 
 ## Security model
@@ -32,18 +47,29 @@ commands and events and has no shell, arbitrary filesystem, HTTP, or opener
 capability. Its content security policy permits only bundled local content and
 Tauri IPC.
 
-The production control socket is `/var/run/fips/control.sock`. Access is still
-subject to the socket's POSIX ownership and mode; packaged FIPS installations
-authorize members of the local `fips` group. After adding a user to that group,
-log out and back in so macOS refreshes supplementary group membership.
+The node and lifecycle sockets are `/var/run/fips/control.sock` and
+`/var/run/fips-mac/service.sock`. App-managed installations grant local
+administrators access without creating a new Unix group or requiring a new
+login session. The root lifecycle service is owned by FIPS, accepts
+only fixed status/install/migrate/repair/start/stop/restart/remove operations,
+and never accepts a client-supplied executable, path, launchd label, or shell
+argument.
 
-The Mac App Store build is isolated from the direct-download build. It enables
-App Sandbox and grants a narrowly scoped temporary read/write exception only
-for `/private/var/run/fips/control.sock`, the canonical path backing
-`/var/run/fips/control.sock` on macOS. Apple requires an explanation for this
-temporary exception during App Store submission. The intended long-term
+The bundled node is built without source changes from the exact revision in
+[`fips-source-revision`](fips-source-revision). Both it and the lifecycle
+service remain inside the signed application bundle and are registered using
+Apple's `SMAppService`; nothing is copied into `/usr/local/bin` or
+`/Library/LaunchDaemons`. App-managed configuration lives in
+`/Library/Application Support/FIPS` and is preserved when the service is
+removed. See [Developer ID distribution](docs/developer-id.md) and
+[third-party notices](THIRD_PARTY_NOTICES.md).
+
+The legacy Mac App Store build is isolated from the direct-download build. It enables
+App Sandbox and grants narrowly scoped temporary read/write exceptions only
+for the exact control socket under `/private/var/run/fips`. Apple requires an
+explanation for these temporary exceptions during App Store submission. The intended long-term
 replacement is an App Group or other sandbox-native IPC channel shared with the
-daemon. See
+daemon, but remains monitor-only and does not include the app-managed node. See
 [Mac App Store and TestFlight](docs/app-store.md).
 
 ## Requirements
@@ -51,7 +77,8 @@ daemon. See
 - macOS 13 or newer
 - [Bun](https://bun.sh/)
 - Rust stable and the Apple target being built
-- A local FIPS checkout or installed FIPS daemon
+- A local FIPS checkout at the revision in `fips-source-revision` when building
+  the bundled Developer ID edition
 
 ## Run locally
 
@@ -71,7 +98,14 @@ By default the monitor checks these sockets in order:
 For a source-built daemon using another socket, set the path before launching:
 
 ```sh
-FIPS_MONITOR_SOCKET=/absolute/path/to/control.sock bun run tauri dev
+FIPS_MAC_SOCKET=/absolute/path/to/control.sock bun run tauri dev
+```
+
+During lifecycle-controller development, its socket can be overridden
+independently:
+
+```sh
+FIPS_MAC_SERVICE_SOCKET=/absolute/path/to/service.sock bun run tauri dev
 ```
 
 You can also change the development socket from **Settings → Development
@@ -87,8 +121,11 @@ bun install --frozen-lockfile
 bun run check
 bun run test
 cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+cargo fmt --manifest-path src-tauri/service/Cargo.toml --all -- --check
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo clippy --manifest-path src-tauri/service/Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/service/Cargo.toml
 ```
 
 Run the sibling-checkout contract smoke test after changing the control client:
@@ -100,7 +137,7 @@ Run the sibling-checkout contract smoke test after changing the control client:
 It defaults to `../fips`. Set `FIPS_CHECKOUT_PATH` to use another checkout.
 
 The application icon has one editable vector source at
-`src-tauri/icons/fips-monitor-mark.svg`. Regenerate the bundled icon sizes with:
+`src-tauri/icons/fips-mac-mark.svg`. Regenerate the bundled icon sizes with:
 
 ```sh
 ./scripts/generate-icons.sh
@@ -112,17 +149,24 @@ language so they can reflect node state dynamically.
 
 ## Build
 
-Create the normal direct-download app and DMG:
+Create the full universal Developer ID app and DMG, including the pinned FIPS
+node:
 
 ```sh
-bun run tauri build
+bun run tauri:build:developer-id
 ```
 
-Tags matching `v*` build the universal Apple Silicon/Intel target and produce a
-signed, notarized DMG. The release workflow verifies signatures, Gatekeeper,
-stapling, and both architecture slices before publishing a draft GitHub release.
+The Developer ID wrapper first runs `scripts/prepare-macos-bundle`, which compiles FIPS and the lifecycle
+service for Intel and Apple Silicon before Tauri signs the nested executables
+and app. Set `FIPS_CHECKOUT_PATH` only when FIPS is not available at `../fips`.
+The script refuses a different revision or tracked local changes.
 
-For a signed Mac App Store package suitable for TestFlight, follow
+Tags matching `v*` build the universal Apple Silicon/Intel target and produce a
+signed, notarized DMG. The release workflow verifies all three executable
+signatures, Gatekeeper, stapling, launchd plists, and architecture slices before
+publishing a draft GitHub release.
+
+For the separate monitor-only Mac App Store package, follow
 [docs/app-store.md](docs/app-store.md). App Store packaging uses a separate
 Tauri configuration and does not sandbox normal development or Developer ID
 builds.
@@ -131,6 +175,9 @@ builds.
 
 - `src/` — Svelte dashboard, settings, and frontend tests
 - `src-tauri/src/` — tray application, monitor task, and FIPS control client
+- `src-tauri/service/` — separately built privileged lifecycle controller
+- `src-tauri/launchd/` — app-bundled `SMAppService` LaunchDaemon definitions
+- `src-tauri/resources/` — safe default configuration and bundled notices
 - `src-tauri/capabilities/` — narrowly scoped webview permissions
 - `src-tauri/Entitlements.appstore.plist` — Mac App Store sandbox entitlements
 - `scripts/` — icon generation, FIPS contract smoke test, and App Store tooling
@@ -140,11 +187,13 @@ builds.
 
 The first release is macOS-only. It does not manage external hosts or ACL
 files, the firewall, Linux gateway configuration, automatic updates, or iOS.
-FIPS must release the managed configuration API before the settings controls are
-considered supported. Older daemons remain monitorable and the Settings view
-explains when an upgrade is required.
+Only the Developer ID edition provides the one-app node installation. A future
+Mac App Store/TestFlight edition would require a separate Network Extension
+architecture; the root LaunchDaemon is intentionally not presented as an App
+Store-compatible design. Older external daemons remain monitorable and the
+Settings view explains when an upgrade is required.
 
 ## License
 
-FIPS Monitor is free software licensed under the
+FIPS Mac is free software licensed under the
 [GNU Affero General Public License, version 3](LICENSE) (`AGPL-3.0-only`).

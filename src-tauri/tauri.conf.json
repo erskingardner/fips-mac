@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "FIPS Monitor",
+  "productName": "FIPS",
   "version": "2026.8.6",
-  "identifier": "com.paper-robin.fips-monitor",
+  "identifier": "com.paper-robin.fips-mac",
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "FIPS Monitor",
+        "title": "FIPS",
         "width": 1040,
         "height": 720,
         "minWidth": 820,

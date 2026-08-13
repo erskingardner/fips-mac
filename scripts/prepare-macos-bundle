@@ -1,0 +1,90 @@
+#!/bin/zsh
+
+set -euo pipefail
+
+project_root=${0:A:h:h}
+if (( ! $+commands[rustup] )); then
+  print -u2 "rustup is required to build the bundled FIPS node."
+  exit 1
+fi
+rustup_bin=${commands[rustup]:A:h}
+export PATH="$rustup_bin:$PATH"
+export RUSTUP_TOOLCHAIN=${RUSTUP_TOOLCHAIN:-stable}
+fips_checkout=${FIPS_CHECKOUT_PATH:-"$project_root/../fips"}
+expected_revision=$(<"$project_root/fips-source-revision")
+requested_target=${TAURI_ENV_TARGET_TRIPLE:-$(rustc --print host-tuple)}
+binary_dir="$project_root/src-tauri/binaries"
+service_manifest="$project_root/src-tauri/service/Cargo.toml"
+service_target_dir="$project_root/src-tauri/target/service"
+
+if [[ ! -f "$fips_checkout/Cargo.toml" ]]; then
+  print -u2 "FIPS checkout not found at $fips_checkout"
+  print -u2 "Set FIPS_CHECKOUT_PATH to the source checkout used for this release."
+  exit 1
+fi
+
+actual_revision=$(git -C "$fips_checkout" rev-parse HEAD)
+if [[ "$actual_revision" != "$expected_revision" ]]; then
+  print -u2 "FIPS source revision mismatch."
+  print -u2 "Expected: $expected_revision"
+  print -u2 "Actual:   $actual_revision"
+  print -u2 "Review the FIPS update, then update fips-source-revision intentionally."
+  exit 1
+fi
+if [[ -n $(git -C "$fips_checkout" status --porcelain --untracked-files=no) ]]; then
+  print -u2 "The pinned FIPS checkout has tracked local changes; refusing to package an unreproducible node."
+  exit 1
+fi
+
+case "$requested_target" in
+  universal-apple-darwin)
+    targets=(aarch64-apple-darwin x86_64-apple-darwin)
+    ;;
+  aarch64-apple-darwin|x86_64-apple-darwin)
+    targets=($requested_target)
+    ;;
+  *)
+    print -u2 "Bundled FIPS nodes are currently supported only for macOS targets (got $requested_target)."
+    exit 1
+    ;;
+esac
+
+mkdir -p "$binary_dir"
+
+for target in $targets; do
+  if ! rustup target list --toolchain "$RUSTUP_TOOLCHAIN" --installed | grep -Fxq "$target"; then
+    print -u2 "Missing Rust target $target. Install it with: rustup target add $target"
+    exit 1
+  fi
+
+  print "Building unchanged FIPS node for $target"
+  cargo build --manifest-path "$fips_checkout/Cargo.toml" --release --locked --bin fips --target "$target"
+  cp "$fips_checkout/target/$target/release/fips" "$binary_dir/fips-$target"
+
+  print "Building FIPS Mac service for $target"
+  cargo build \
+    --manifest-path "$service_manifest" \
+    --target-dir "$service_target_dir" \
+    --release \
+    --locked \
+    --bin fips-mac-service \
+    --target "$target"
+  cp "$service_target_dir/$target/release/fips-mac-service" "$binary_dir/fips-mac-service-$target"
+done
+
+if [[ "$requested_target" == "universal-apple-darwin" ]]; then
+  lipo -create \
+    "$binary_dir/fips-aarch64-apple-darwin" \
+    "$binary_dir/fips-x86_64-apple-darwin" \
+    -output "$binary_dir/fips-universal-apple-darwin"
+  lipo -create \
+    "$binary_dir/fips-mac-service-aarch64-apple-darwin" \
+    "$binary_dir/fips-mac-service-x86_64-apple-darwin" \
+    -output "$binary_dir/fips-mac-service-universal-apple-darwin"
+fi
+
+chmod 0755 "$binary_dir/fips-$requested_target" "$binary_dir/fips-mac-service-$requested_target"
+
+print "Prepared bundled executables for $requested_target"
+lipo -archs "$binary_dir/fips-$requested_target"
+lipo -archs "$binary_dir/fips-mac-service-$requested_target"

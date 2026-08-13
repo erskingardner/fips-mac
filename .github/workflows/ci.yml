@@ -27,8 +27,11 @@ jobs:
       - run: bun run check
       - run: bun run test
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+      - run: cargo fmt --manifest-path src-tauri/service/Cargo.toml --all -- --check
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+      - run: cargo clippy --manifest-path src-tauri/service/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --manifest-path src-tauri/Cargo.toml
+      - run: cargo test --manifest-path src-tauri/service/Cargo.toml
       - name: Unsigned native build
         run: bun run tauri build --no-bundle
 
@@ -38,17 +41,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          path: fips-monitor
+          path: fips-mac
       - uses: actions/checkout@v4
         with:
           repository: erskingardner/fips
+          ref: 3e7a0afbe45b3a475ab7b90edc1f5fab4494418a
           path: fips
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: fips
       - name: Test managed configuration contract
-        working-directory: fips-monitor
+        working-directory: fips-mac
         env:
           FIPS_CHECKOUT_PATH: ${{ github.workspace }}/fips
         run: ./scripts/smoke-fips.sh

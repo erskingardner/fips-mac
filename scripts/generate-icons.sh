@@ -2,10 +2,10 @@
 set -eu
 
 PROJECT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-SOURCE_ICON="$PROJECT_DIR/src-tauri/icons/fips-monitor-mark.svg"
+SOURCE_ICON="$PROJECT_DIR/src-tauri/icons/fips-mac-mark.svg"
 OUTPUT_DIR="$PROJECT_DIR/src-tauri/icons"
 ICON_WORK_DIR=$(mktemp -d)
-ICONSET_DIR="$ICON_WORK_DIR/FIPS Monitor.iconset"
+ICONSET_DIR="$ICON_WORK_DIR/FIPS.iconset"
 
 cleanup() {
   case "$ICON_WORK_DIR" in

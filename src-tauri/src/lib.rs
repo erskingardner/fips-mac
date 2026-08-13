@@ -1,8 +1,11 @@
 mod control;
+mod preferences;
+mod service;
 
 use control::{ClientError, ControlClient, resolve_socket_path};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use service::{ServiceStatus, resolve_service_socket_path};
 use std::{
     path::PathBuf,
     sync::{
@@ -21,7 +24,7 @@ use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use tokio::sync::Notify;
 
-const TRAY_ID: &str = "fips-monitor";
+const TRAY_ID: &str = "fips";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MonitorSnapshot {
@@ -32,6 +35,7 @@ pub struct MonitorSnapshot {
     pub status: Option<Value>,
     pub capabilities: Option<Value>,
     pub configuration_supported: bool,
+    pub service: ServiceStatus,
 }
 
 impl MonitorSnapshot {
@@ -44,20 +48,25 @@ impl MonitorSnapshot {
             status: None,
             capabilities: None,
             configuration_supported: false,
+            service: ServiceStatus::checking(),
         }
     }
 }
 
 pub struct AppState {
     pub socket_path: Mutex<PathBuf>,
+    pub service_socket_path: PathBuf,
     pub last_snapshot: Mutex<MonitorSnapshot>,
     pub refresh: Notify,
+    pub service_action_busy: AtomicBool,
     onboarding_opened: AtomicBool,
 }
 
 struct TrayMenuState {
     status_item: MenuItem<tauri::Wry>,
     peer_item: MenuItem<tauri::Wry>,
+    service_toggle_item: MenuItem<tauri::Wry>,
+    service_restart_item: MenuItem<tauri::Wry>,
     launch_item: CheckMenuItem<tauri::Wry>,
 }
 
@@ -127,7 +136,11 @@ fn classify_status(status: &Value) -> (&'static str, String) {
     ("healthy", "The FIPS node is running normally.".into())
 }
 
-fn snapshot_for_error(path: &std::path::Path, error: ClientError) -> MonitorSnapshot {
+fn snapshot_for_error(
+    path: &std::path::Path,
+    error: ClientError,
+    service: ServiceStatus,
+) -> MonitorSnapshot {
     let health = match error.kind.as_str() {
         "not_running" => "stopped",
         "permission_denied" => "permission_denied",
@@ -135,9 +148,11 @@ fn snapshot_for_error(path: &std::path::Path, error: ClientError) -> MonitorSnap
         _ => "degraded",
     };
     let detail = match health {
+        "stopped" if service.available && !service.enabled && service.state == "stopped" =>
+            "FIPS is turned off. Use the service switch to start it.".into(),
         "stopped" => "FIPS is not running or its control socket is not installed.".into(),
         "permission_denied" => {
-            "Access was denied. Confirm this account belongs to the fips group, then log out and back in."
+            "Access was denied. Repair an app-managed node, or confirm this account belongs to the fips group for a package-managed node."
                 .into()
         }
         "incompatible" => format!("The daemon response is incompatible: {}", error.message),
@@ -151,10 +166,12 @@ fn snapshot_for_error(path: &std::path::Path, error: ClientError) -> MonitorSnap
         status: None,
         capabilities: None,
         configuration_supported: false,
+        service,
     }
 }
 
-async fn collect_snapshot(path: PathBuf) -> MonitorSnapshot {
+async fn collect_snapshot(path: PathBuf, service_path: PathBuf) -> MonitorSnapshot {
+    let service = service::query_status(service_path).await;
     let client = ControlClient::new(path.clone());
     match client.query("show_status").await {
         Ok(status) => {
@@ -173,9 +190,10 @@ async fn collect_snapshot(path: PathBuf) -> MonitorSnapshot {
                 status: Some(status),
                 capabilities,
                 configuration_supported,
+                service,
             }
         }
-        Err(error) => snapshot_for_error(&path, error),
+        Err(error) => snapshot_for_error(&path, error, service),
     }
 }
 
@@ -190,12 +208,13 @@ fn polling_interval(visible: bool) -> Duration {
 async fn monitor(app: AppHandle) {
     loop {
         let path = app.state::<AppState>().socket_path.lock().unwrap().clone();
-        let snapshot = collect_snapshot(path).await;
+        let service_path = app.state::<AppState>().service_socket_path.clone();
+        let snapshot = collect_snapshot(path, service_path).await;
         *app.state::<AppState>().last_snapshot.lock().unwrap() = snapshot.clone();
         update_tray(&app, &snapshot);
         let _ = app.emit("monitor://snapshot", &snapshot);
 
-        if should_open_onboarding(&snapshot.health)
+        if should_open_onboarding(&snapshot)
             && !app
                 .state::<AppState>()
                 .onboarding_opened
@@ -216,14 +235,20 @@ async fn monitor(app: AppHandle) {
     }
 }
 
-fn should_open_onboarding(health: &str) -> bool {
-    matches!(health, "stopped" | "permission_denied")
+fn should_open_onboarding(snapshot: &MonitorSnapshot) -> bool {
+    snapshot.health == "permission_denied"
+        || snapshot.service.ownership == "conflict"
+        || snapshot.service.registration == "requires_approval"
+        || (snapshot.health == "stopped"
+            && !(snapshot.service.available
+                && !snapshot.service.enabled
+                && snapshot.service.state == "stopped"))
 }
 
 fn update_tray(app: &AppHandle, snapshot: &MonitorSnapshot) {
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
         let _ = tray.set_icon_with_as_template(Some(icon_for_health(&snapshot.health)), true);
-        let tooltip = format!("FIPS Monitor — {}", health_label(&snapshot.health));
+        let tooltip = format!("FIPS — {}", health_label(&snapshot.health));
         let _ = tray.set_tooltip(Some(tooltip));
     }
     if let Some(menu) = app.try_state::<TrayMenuState>() {
@@ -240,6 +265,25 @@ fn update_tray(app: &AppHandle, snapshot: &MonitorSnapshot) {
             "{peers} authenticated peer{}",
             if peers == 1 { "" } else { "s" }
         ));
+        if snapshot.service.available {
+            let _ = menu.service_toggle_item.set_enabled(true);
+            let _ = menu
+                .service_toggle_item
+                .set_text(if snapshot.service.running {
+                    "Stop FIPS"
+                } else {
+                    "Start FIPS"
+                });
+            let _ = menu
+                .service_restart_item
+                .set_enabled(snapshot.service.running);
+        } else {
+            let _ = menu
+                .service_toggle_item
+                .set_text("FIPS service controls unavailable");
+            let _ = menu.service_toggle_item.set_enabled(false);
+            let _ = menu.service_restart_item.set_enabled(false);
+        }
     }
 }
 
@@ -253,7 +297,7 @@ fn health_label(health: &str) -> &'static str {
     }
 }
 
-fn show_window(app: &AppHandle, section: &str) {
+pub(crate) fn show_window(app: &AppHandle, section: &str) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
@@ -392,6 +436,15 @@ fn circle(put: &mut impl FnMut(i32, i32), cx: i32, cy: i32, radius: i32) {
 fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     let status_item = MenuItem::with_id(app, "status", "Node: Checking…", false, None::<&str>)?;
     let peer_item = MenuItem::with_id(app, "peers", "0 authenticated peers", false, None::<&str>)?;
+    let service_toggle_item = MenuItem::with_id(
+        app,
+        "service_toggle",
+        "FIPS service controls unavailable",
+        false,
+        None::<&str>,
+    )?;
+    let service_restart_item =
+        MenuItem::with_id(app, "service_restart", "Restart FIPS", false, None::<&str>)?;
     let open_item = MenuItem::with_id(app, "open", "Open Dashboard", true, None::<&str>)?;
     let settings_item = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
     let refresh_item = MenuItem::with_id(app, "refresh", "Refresh", true, None::<&str>)?;
@@ -406,12 +459,14 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     )?;
     let separator_one = PredefinedMenuItem::separator(app)?;
     let separator_two = PredefinedMenuItem::separator(app)?;
-    let quit_item = MenuItem::with_id(app, "quit", "Quit FIPS Monitor", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "quit", "Quit FIPS", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
         &[
             &status_item,
             &peer_item,
+            &service_toggle_item,
+            &service_restart_item,
             &separator_one,
             &open_item,
             &settings_item,
@@ -425,6 +480,8 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     app.manage(TrayMenuState {
         status_item,
         peer_item,
+        service_toggle_item,
+        service_restart_item,
         launch_item: launch_item.clone(),
     });
 
@@ -432,11 +489,40 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         .menu(&menu)
         .icon(icon_for_health("stopped"))
         .icon_as_template(true)
-        .tooltip("FIPS Monitor — Checking")
+        .tooltip("FIPS — Checking")
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => show_window(app, "overview"),
             "settings" => show_window(app, "settings"),
             "refresh" => app.state::<AppState>().refresh.notify_one(),
+            "service_toggle" => {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let running = {
+                        let state = app.state::<AppState>();
+                        state
+                            .last_snapshot
+                            .lock()
+                            .map(|snapshot| snapshot.service.running)
+                            .unwrap_or(false)
+                    };
+                    let command = if running { "stop" } else { "start" };
+                    let state = app.state::<AppState>();
+                    if let Err(error) = service::perform_service_action(&state, command).await {
+                        show_window(&app, "overview");
+                        let _ = app.emit("service://error", error.message);
+                    }
+                });
+            }
+            "service_restart" => {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = app.state::<AppState>();
+                    if let Err(error) = service::perform_service_action(&state, "restart").await {
+                        show_window(&app, "overview");
+                        let _ = app.emit("service://error", error.message);
+                    }
+                });
+            }
             "launch" => {
                 if let Some(menu) = app.try_state::<TrayMenuState>() {
                     let enabled = menu.launch_item.is_checked().unwrap_or(false);
@@ -493,6 +579,7 @@ fn copy_node_npub(app: AppHandle) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let socket_path = resolve_socket_path(None);
+    let service_socket_path = resolve_service_socket_path();
     let initial_snapshot = MonitorSnapshot::starting(&socket_path);
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -502,8 +589,10 @@ pub fn run() {
         ))
         .manage(AppState {
             socket_path: Mutex::new(socket_path),
+            service_socket_path,
             last_snapshot: Mutex::new(initial_snapshot),
             refresh: Notify::new(),
+            service_action_busy: AtomicBool::new(false),
             onboarding_opened: AtomicBool::new(false),
         })
         .invoke_handler(tauri::generate_handler![
@@ -519,21 +608,46 @@ pub fn run() {
             control::reset_config,
             control::set_socket_path,
             control::refresh_now,
+            service::set_fips_service_running,
+            service::restart_fips_service,
+            service::get_node_installation,
+            service::use_existing_node,
+            service::register_node_service,
+            service::repair_node_service,
+            service::remove_node_service,
+            service::open_background_settings,
+            preferences::get_app_preferences,
+            preferences::set_app_preferences,
             copy_node_npub,
         ])
         .setup(|app| {
-            #[cfg(target_os = "macos")]
-            app.handle()
-                .set_activation_policy(tauri::ActivationPolicy::Accessory)?;
+            let preferences = preferences::load(app.handle());
+            preferences::apply_dock_preference(app.handle(), preferences.show_dock_icon)
+                .map_err(std::io::Error::other)?;
             setup_tray(app)?;
             if let Some(window) = app.get_webview_window("main") {
                 configure_window(window);
             }
+            if preferences.open_dashboard_at_launch {
+                show_window(app.handle(), "overview");
+            }
             tauri::async_runtime::spawn(monitor(app.handle().clone()));
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running FIPS Monitor");
+        .build(tauri::generate_context!())
+        .expect("error while building FIPS")
+        .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen {
+                has_visible_windows: false,
+                ..
+            } = event
+            {
+                show_window(app, "overview");
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app, event);
+        });
 }
 
 #[cfg(test)]
@@ -583,9 +697,32 @@ mod tests {
 
     #[test]
     fn opens_onboarding_for_installation_and_permission_problems() {
-        assert!(should_open_onboarding("stopped"));
-        assert!(should_open_onboarding("permission_denied"));
-        assert!(!should_open_onboarding("healthy"));
-        assert!(!should_open_onboarding("degraded"));
+        let path = std::path::Path::new("/var/run/fips/control.sock");
+        let stopped = snapshot_for_error(
+            path,
+            ClientError {
+                kind: "not_running".into(),
+                message: "not running".into(),
+            },
+            ServiceStatus::checking(),
+        );
+        assert!(should_open_onboarding(&stopped));
+
+        let mut intentionally_stopped = stopped.clone();
+        intentionally_stopped.service.available = true;
+        intentionally_stopped.service.state = "stopped".into();
+        assert!(!should_open_onboarding(&intentionally_stopped));
+
+        let mut failed_service = intentionally_stopped.clone();
+        failed_service.service.enabled = true;
+        assert!(should_open_onboarding(&failed_service));
+
+        let mut permission_denied = stopped.clone();
+        permission_denied.health = "permission_denied".into();
+        assert!(should_open_onboarding(&permission_denied));
+
+        let mut healthy = stopped;
+        healthy.health = "healthy".into();
+        assert!(!should_open_onboarding(&healthy));
     }
 }

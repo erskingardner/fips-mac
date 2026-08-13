@@ -5,6 +5,28 @@ export type Health =
   | "incompatible"
   | "permission_denied";
 
+export interface ServiceStatus {
+  available: boolean;
+  state: "running" | "stopped" | "unknown";
+  enabled: boolean;
+  loaded: boolean;
+  running: boolean;
+  controller_version?: number;
+  pid?: number;
+  last_exit_status?: number;
+  detail?: string;
+  ownership: "app_managed" | "external" | "none" | "conflict" | "unknown";
+  installation: "app_managed" | "external" | "not_installed" | "conflict" | "checking";
+  can_migrate: boolean;
+  config_path?: string;
+  registration: "enabled" | "requires_approval" | "not_registered" | "bundle_incomplete" | "unsupported";
+}
+
+export interface AppPreferences {
+  show_dock_icon: boolean;
+  open_dashboard_at_launch: boolean;
+}
+
 export interface MonitorSnapshot {
   health: Health;
   detail: string;
@@ -13,6 +35,7 @@ export interface MonitorSnapshot {
   status?: Record<string, unknown>;
   capabilities?: Record<string, unknown>;
   configuration_supported: boolean;
+  service: ServiceStatus;
 }
 
 export interface LanDiscoveryCounters {

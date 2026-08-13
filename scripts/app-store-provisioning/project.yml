@@ -1,4 +1,4 @@
-name: FIPSMonitorProvisioning
+name: FIPSMacProvisioning
 
 options:
   deploymentTarget:
@@ -20,5 +20,5 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
         MARKETING_VERSION: 2026.8.6
-        PRODUCT_BUNDLE_IDENTIFIER: com.paper-robin.fips-monitor
-        PRODUCT_NAME: FIPS Monitor
+        PRODUCT_BUNDLE_IDENTIFIER: com.paper-robin.fips-mac
+        PRODUCT_NAME: FIPS

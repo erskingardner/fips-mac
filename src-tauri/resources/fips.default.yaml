@@ -1,0 +1,29 @@
+# FIPS Mac safe default configuration
+#
+# The node starts with a persistent identity and a reachable UDP transport.
+# TUN and DNS remain off until the user explicitly enables them in Settings.
+
+node:
+  identity:
+    persistent: true
+  control:
+    enabled: true
+    socket_path: /var/run/fips/control.sock
+  rendezvous:
+    lan:
+      enabled: false
+
+tun:
+  enabled: false
+  name: fips0
+  mtu: 1280
+
+dns:
+  enabled: false
+  port: 5354
+
+transports:
+  udp:
+    bind_addr: "0.0.0.0:2121"
+
+peers: []

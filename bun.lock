@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "tauri-app",
+      "name": "fips-mac",
       "dependencies": {
         "@tauri-apps/api": "^2",
         "@tauri-apps/plugin-autostart": "^2.5.1",

@@ -5,8 +5,8 @@ set -euo pipefail
 project_root=${0:A:h:h}
 helper_root="$project_root/scripts/app-store-provisioning"
 profile_dir="$project_root/src-tauri/appstore"
-profile_path="$profile_dir/FIPSMonitor.provisionprofile"
-provision_tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/fips-monitor-provisioning.XXXXXX")
+profile_path="$profile_dir/FIPS.provisionprofile"
+provision_tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/fips-mac-provisioning.XXXXXX")
 
 cleanup() {
   if [[ -n "${provision_tmp_dir:-}" && -d "$provision_tmp_dir" ]]; then
@@ -29,18 +29,18 @@ PROVISIONING_HELPER_ROOT="$helper_root" xcodegen \
   --project-root "$helper_root"
 
 xcodebuild \
-  -project "$provision_tmp_dir/project/FIPSMonitorProvisioning.xcodeproj" \
+  -project "$provision_tmp_dir/project/FIPSMacProvisioning.xcodeproj" \
   -scheme ProvisioningHelper \
   -configuration Release \
   -destination 'generic/platform=macOS' \
   -derivedDataPath "$provision_tmp_dir/DerivedData" \
-  -archivePath "$provision_tmp_dir/FIPSMonitorProvisioning.xcarchive" \
+  -archivePath "$provision_tmp_dir/FIPSMacProvisioning.xcarchive" \
   -allowProvisioningUpdates \
   archive
 
 xcodebuild \
   -exportArchive \
-  -archivePath "$provision_tmp_dir/FIPSMonitorProvisioning.xcarchive" \
+  -archivePath "$provision_tmp_dir/FIPSMacProvisioning.xcarchive" \
   -exportPath "$provision_tmp_dir/export" \
   -exportOptionsPlist "$helper_root/ExportOptions.plist" \
   -allowProvisioningUpdates
@@ -69,7 +69,7 @@ if [[ "$profile_team" != "8Z6Q2LZ77W" ]]; then
   exit 1
 fi
 
-if [[ "$profile_app_id" != "8Z6Q2LZ77W.com.paper-robin.fips-monitor" ]]; then
+if [[ "$profile_app_id" != "8Z6Q2LZ77W.com.paper-robin.fips-mac" ]]; then
   print -u2 "Generated profile has unexpected application identifier: $profile_app_id"
   exit 1
 fi

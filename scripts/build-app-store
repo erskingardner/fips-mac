@@ -5,10 +5,10 @@ set -euo pipefail
 project_root=${0:A:h:h}
 rustup_bin="$HOME/.cargo/bin"
 tauri_config="$project_root/src-tauri/tauri.conf.json"
-profile_path="$project_root/src-tauri/appstore/FIPSMonitor.provisionprofile"
+profile_path="$project_root/src-tauri/appstore/FIPS.provisionprofile"
 app_identity="Apple Distribution: PAPER ROBIN DI JEFFREY ERSKIN GARDNER & C. SAS (8Z6Q2LZ77W)"
 installer_identity="3rd Party Mac Developer Installer: PAPER ROBIN DI JEFFREY ERSKIN GARDNER & C. SAS (8Z6Q2LZ77W)"
-expected_app_id="8Z6Q2LZ77W.com.paper-robin.fips-monitor"
+expected_app_id="8Z6Q2LZ77W.com.paper-robin.fips-mac"
 expected_socket_exception="/private/var/run/fips/control.sock"
 product_name=$(jq -er '.productName' "$tauri_config")
 app_version=$(jq -er '.version' "$tauri_config")
@@ -94,7 +94,7 @@ bun run tauri build \
 codesign --verify --deep --strict --verbose=2 "$app_path"
 
 info_plist="$app_path/Contents/Info.plist"
-if [[ $(plutil -extract CFBundleIdentifier raw -o - "$info_plist") != "com.paper-robin.fips-monitor" ]]; then
+if [[ $(plutil -extract CFBundleIdentifier raw -o - "$info_plist") != "com.paper-robin.fips-mac" ]]; then
   print -u2 "Signed application has an unexpected bundle identifier."
   exit 1
 fi

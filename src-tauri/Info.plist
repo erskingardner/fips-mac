@@ -6,5 +6,11 @@
   <false/>
   <key>LSUIElement</key>
   <true/>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>FIPS uses your local network to discover and connect securely to other FIPS nodes you enable.</string>
+  <key>NSBonjourServices</key>
+  <array>
+    <string>_fips._udp</string>
+  </array>
 </dict>
 </plist>

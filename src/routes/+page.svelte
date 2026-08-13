@@ -13,11 +13,13 @@
   import type {
     ApplyResult,
     ApplyStatus,
+    AppPreferences,
     ConfigSnapshot,
     InvokeError,
     LanDiscoveryStatus,
     MonitorSnapshot,
     Peer,
+    ServiceStatus,
     Transport,
     ValidationResult,
   } from "$lib/types";
@@ -34,6 +36,18 @@
     socket_path: "/var/run/fips/control.sock",
     checked_at_ms: Date.now(),
     configuration_supported: false,
+    service: {
+      available: false,
+      state: "unknown",
+      enabled: false,
+      loaded: false,
+      running: false,
+      detail: "Looking for the FIPS service controller…",
+      ownership: "unknown",
+      installation: "checking",
+      can_migrate: false,
+      registration: "not_registered",
+    },
   };
 
   let snapshot = $state<MonitorSnapshot>(initialSnapshot);
@@ -48,6 +62,16 @@
   let connectAddress = $state("");
   let connectTransport = $state("udp");
   let actionBusy = $state(false);
+  let serviceBusy = $state(false);
+  let serviceTransition = $state("");
+  let onboardingOpen = $state(false);
+  let installBusy = $state(false);
+  let installMessage = $state("");
+  let pendingInstallAction = $state<"install" | "migrate" | "existing">("install");
+  let preferences = $state<AppPreferences>({
+    show_dock_icon: false,
+    open_dashboard_at_launch: false,
+  });
   let toast = $state("");
 
   let config = $state<ConfigSnapshot | null>(null);
@@ -71,6 +95,15 @@
   );
   const guidedLanIssue = $derived(guided ? lanDiscoveryIssue(guided) : null);
   const online = $derived(snapshot.health === "healthy" || snapshot.health === "degraded");
+  const serviceLabel = $derived(
+    serviceBusy
+      ? serviceTransition
+      : snapshot.service.available
+        ? snapshot.service.running
+          ? "Running"
+          : "Stopped"
+        : "Unavailable",
+  );
   const healthLabel = $derived(
     snapshot.health === "permission_denied"
       ? "Permission denied"
@@ -189,6 +222,153 @@
     try {
       await invoke("copy_node_npub");
       toast = "Node npub copied.";
+    } catch (error) {
+      toast = errorMessage(error);
+    }
+  }
+
+  async function setServiceRunning(running: boolean) {
+    if (!isTauri() || !snapshot.service.available || serviceBusy) return;
+    serviceBusy = true;
+    serviceTransition = running ? "Starting…" : "Stopping…";
+    try {
+      const service = await invoke<ServiceStatus>("set_fips_service_running", { running });
+      snapshot = {
+        ...snapshot,
+        service,
+        ...(running
+          ? {}
+          : {
+              health: "stopped" as const,
+              detail: "FIPS is turned off. Use the service switch to start it.",
+              status: undefined,
+            }),
+      };
+      toast = running ? "FIPS started." : "FIPS stopped.";
+    } catch (error) {
+      toast = errorMessage(error);
+    } finally {
+      serviceBusy = false;
+      serviceTransition = "";
+      invoke("refresh_now").catch(() => {});
+    }
+  }
+
+  async function restartService() {
+    if (!isTauri() || !snapshot.service.available || !snapshot.service.running || serviceBusy) return;
+    serviceBusy = true;
+    serviceTransition = "Restarting…";
+    try {
+      const service = await invoke<ServiceStatus>("restart_fips_service");
+      snapshot = { ...snapshot, service };
+      toast = "FIPS restarted.";
+    } catch (error) {
+      toast = errorMessage(error);
+    } finally {
+      serviceBusy = false;
+      serviceTransition = "";
+      invoke("refresh_now").catch(() => {});
+    }
+  }
+
+  async function refreshInstallation() {
+    if (!isTauri()) return;
+    try {
+      const service = await invoke<ServiceStatus>("get_node_installation");
+      snapshot = { ...snapshot, service };
+    } catch (error) {
+      installMessage = errorMessage(error);
+    }
+  }
+
+  async function installNode(migrate = false) {
+    if (!isTauri() || installBusy) return;
+    installBusy = true;
+    pendingInstallAction = migrate ? "migrate" : "install";
+    installMessage = migrate
+      ? "Preserving your existing identity and configuration…"
+      : "Registering the FIPS background service with macOS…";
+    try {
+      const service = await invoke<ServiceStatus>("register_node_service", { migrate });
+      snapshot = { ...snapshot, service };
+      installMessage = migrate
+        ? "Migration complete. FIPS now manages this node."
+        : "FIPS is installed and starting.";
+      onboardingOpen = false;
+      pendingInstallAction = "install";
+      toast = installMessage;
+    } catch (error) {
+      installMessage = errorMessage(error);
+      await refreshInstallation();
+    } finally {
+      installBusy = false;
+      invoke("refresh_now").catch(() => {});
+    }
+  }
+
+  async function useExistingNode() {
+    if (!isTauri() || installBusy) return;
+    installBusy = true;
+    pendingInstallAction = "existing";
+    installMessage = "Connecting lifecycle controls to the existing FIPS node…";
+    try {
+      const service = await invoke<ServiceStatus>("use_existing_node");
+      snapshot = { ...snapshot, service };
+      onboardingOpen = false;
+      pendingInstallAction = "install";
+      toast = "Using the existing package-managed FIPS node.";
+    } catch (error) {
+      installMessage = errorMessage(error);
+      await refreshInstallation();
+    } finally {
+      installBusy = false;
+    }
+  }
+
+  async function repairNode() {
+    if (!isTauri() || installBusy) return;
+    installBusy = true;
+    installMessage = "Repairing the local FIPS service…";
+    try {
+      const service = await invoke<ServiceStatus>("repair_node_service");
+      snapshot = { ...snapshot, service };
+      installMessage = "FIPS service repaired.";
+      toast = installMessage;
+    } catch (error) {
+      installMessage = errorMessage(error);
+    } finally {
+      installBusy = false;
+    }
+  }
+
+  async function removeManagedNode() {
+    if (!isTauri() || installBusy || !confirm("Remove the app-managed FIPS service? Its identity and configuration will be preserved.")) return;
+    installBusy = true;
+    try {
+      const service = await invoke<ServiceStatus>("remove_node_service");
+      snapshot = { ...snapshot, service };
+      toast = "App-managed FIPS removed. Configuration was preserved.";
+      onboardingOpen = true;
+    } catch (error) {
+      toast = errorMessage(error);
+    } finally {
+      installBusy = false;
+    }
+  }
+
+  async function openBackgroundSettings() {
+    if (!isTauri()) return;
+    await invoke("open_background_settings");
+  }
+
+  async function savePreferences(next: Partial<AppPreferences>) {
+    if (!isTauri()) return;
+    const proposed = { ...preferences, ...next };
+    try {
+      preferences = await invoke<AppPreferences>("set_app_preferences", {
+        showDockIcon: proposed.show_dock_icon,
+        openDashboardAtLaunch: proposed.open_dashboard_at_launch,
+      });
     } catch (error) {
       toast = errorMessage(error);
     }
@@ -365,7 +545,7 @@
         } else if (status?.state === "applied") {
           applyMessage = "Configuration applied and FIPS restarted successfully.";
         } else {
-          applyMessage = "The apply is still pending. FIPS Monitor will keep showing daemon health as it reconnects.";
+          applyMessage = "The apply is still pending. FIPS will keep showing daemon health as it reconnects.";
         }
       } else {
         applyMessage = result.activation === "hot_peers"
@@ -420,6 +600,7 @@
     if (!isTauri()) return;
     let snapshotUnlisten: UnlistenFn | undefined;
     let navigateUnlisten: UnlistenFn | undefined;
+    let serviceErrorUnlisten: UnlistenFn | undefined;
     void listen<MonitorSnapshot>("monitor://snapshot", (event) => {
       snapshot = event.payload;
       developmentPath = snapshot.socket_path;
@@ -428,23 +609,34 @@
       }
     }).then((unlisten) => (snapshotUnlisten = unlisten));
     void listen<string>("app://navigate", (event) => {
-      void selectView(event.payload === "settings" ? "settings" : "overview");
+      if (event.payload === "onboarding") {
+        onboardingOpen = true;
+        void refreshInstallation();
+      } else {
+        void selectView(event.payload === "settings" ? "settings" : "overview");
+      }
     }).then((unlisten) => (navigateUnlisten = unlisten));
+    void listen<string>("service://error", (event) => {
+      toast = event.payload;
+    }).then((unlisten) => (serviceErrorUnlisten = unlisten));
+    void invoke<AppPreferences>("get_app_preferences").then((value) => (preferences = value));
+    void refreshInstallation();
     void refreshOverview();
     return () => {
       snapshotUnlisten?.();
       navigateUnlisten?.();
+      serviceErrorUnlisten?.();
     };
   });
 </script>
 
-<svelte:head><title>FIPS Monitor</title></svelte:head>
+<svelte:head><title>FIPS</title></svelte:head>
 
 <div class="app-shell">
   <aside class="sidebar">
     <div class="brand">
       <div class="brand-mark" aria-hidden="true"><Icon name="brand" size={34} strokeWidth={1.45} /></div>
-      <div><strong>FIPS</strong><span>Monitor</span></div>
+      <div><strong>FIPS</strong></div>
     </div>
 
     <nav aria-label="Main navigation">
@@ -472,7 +664,7 @@
     <header class="topbar">
       <div>
         <p>LOCAL NODE</p>
-        <h1>{activeView === "overview" ? "Network overview" : activeView === "peers" ? "Authenticated peers" : activeView === "transports" ? "Transport health" : "Node configuration"}</h1>
+        <h1>{activeView === "overview" ? "Network overview" : activeView === "peers" ? "Authenticated peers" : activeView === "transports" ? "Transport health" : "FIPS settings"}</h1>
       </div>
       <div class="header-actions">
         <span class="checked">Checked {new Date(snapshot.checked_at_ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span>
@@ -487,9 +679,13 @@
           <div class="health-symbol">{snapshot.health === "permission_denied" ? "⌕" : snapshot.health === "stopped" ? "○" : "!"}</div>
           <div><strong>{healthLabel}</strong><p>{snapshot.detail}</p></div>
           {#if snapshot.health === "stopped"}
-            <button onclick={() => selectView("settings")}>Connection settings</button>
+            {#if snapshot.service.available && !snapshot.service.running}
+              <button disabled={serviceBusy} onclick={() => setServiceRunning(true)}>{serviceBusy ? serviceTransition : "Start FIPS"}</button>
+            {:else}
+              <button onclick={() => selectView("settings")}>Connection settings</button>
+            {/if}
           {:else if snapshot.health === "permission_denied"}
-            <span class="hint">Group changes require a fresh login session.</span>
+            {#if snapshot.service.ownership === "external"}<span class="hint">Package group changes require a fresh login session.</span>{:else}<button disabled={installBusy} onclick={repairNode}>Repair access</button>{/if}
           {/if}
         </section>
       {/if}
@@ -498,6 +694,30 @@
         <section class="hero-grid">
           <article class="node-card">
             <div class="card-heading"><span>NODE HEALTH</span><span class="pill {snapshot.health}">{healthLabel}</span></div>
+            <div class="service-control-row">
+              <div>
+                <strong>FIPS service</strong>
+                <span title={snapshot.service.detail ?? ""}>{serviceLabel}</span>
+              </div>
+              <div class="service-actions">
+                <label class="service-switch" title={snapshot.service.detail ?? (snapshot.service.running ? "Turn FIPS off" : "Turn FIPS on")}>
+                  <input
+                    type="checkbox"
+                    aria-label={snapshot.service.running ? "Stop FIPS" : "Start FIPS"}
+                    checked={snapshot.service.running}
+                    disabled={!snapshot.service.available || serviceBusy}
+                    onchange={() => setServiceRunning(!snapshot.service.running)}
+                  />
+                  <i></i>
+                </label>
+                <button
+                  class="service-restart"
+                  disabled={!snapshot.service.available || !snapshot.service.running || serviceBusy}
+                  title="Restart FIPS"
+                  onclick={restartService}
+                ><Icon name="refresh" size={12} /> Restart</button>
+              </div>
+            </div>
             <div class="identity-row">
               <div class="node-glyph"><Icon name="node" size={44} strokeWidth={1.35} /></div>
               <div class="identity-copy">
@@ -636,12 +856,34 @@
         </section>
       {:else}
         <section class="settings-shell">
+          <section class="application-settings">
+            <div class="form-title application-title">
+              <div><span>APPLICATION</span><h2>Mac app behavior</h2><p>The FIPS node keeps running when this window closes or the FIPS app quits.</p></div>
+              <span class="ownership-badge">{snapshot.service.ownership === "app_managed" ? "Managed by this app" : snapshot.service.ownership === "external" ? "Existing installation" : snapshot.service.ownership === "conflict" ? "Needs repair" : "Not installed"}</span>
+            </div>
+            <div class="application-grid">
+              <label class="toggle-row"><span><strong>Show in Dock and App Switcher</strong><small>Run FIPS like a normal Mac app while keeping its menu-bar icon.</small></span><input type="checkbox" checked={preferences.show_dock_icon} onchange={(event) => savePreferences({ show_dock_icon: event.currentTarget.checked })}/><i></i></label>
+              <label class="toggle-row"><span><strong>Open dashboard at launch</strong><small>Show this window when FIPS starts instead of staying in the menu bar.</small></span><input type="checkbox" checked={preferences.open_dashboard_at_launch} onchange={(event) => savePreferences({ open_dashboard_at_launch: event.currentTarget.checked })}/><i></i></label>
+            </div>
+            <div class="installation-row">
+              <div><strong>FIPS node installation</strong><small>{snapshot.service.detail ?? (snapshot.service.config_path ? `Configuration: ${snapshot.service.config_path}` : "Install and manage FIPS without using Terminal.")}</small></div>
+              <div>
+                {#if snapshot.service.registration === "bundle_incomplete"}<button class="settings-action" disabled>Node bundle unavailable</button>
+                {:else if snapshot.service.ownership === "none" || snapshot.service.installation === "not_installed"}<button class="primary settings-action" onclick={() => (onboardingOpen = true)}>Install FIPS</button>
+                {:else if snapshot.service.ownership === "external"}<button class="settings-action" onclick={() => (onboardingOpen = true)}>Installation options</button>
+                {:else if snapshot.service.ownership === "conflict"}<button class="settings-action" disabled={installBusy} onclick={repairNode}>Repair</button>
+                {:else}<button class="danger-text" disabled={installBusy} onclick={removeManagedNode}>Remove app-managed node</button>{/if}
+              </div>
+            </div>
+          </section>
+
+          <div class="node-settings-heading"><span>NODE CONFIGURATION</span><p>Configure identity, networking, discovery, transports, and persistent peers.</p></div>
           {#if configLoading}<div class="panel loading">Loading daemon configuration…</div>
           {:else if configError && !config}
             <article class="panel upgrade-card"><div class="upgrade-icon">↑</div><h2>Configuration controls unavailable</h2><p>{configError}</p><p class="muted">Status and peer monitoring continue to work with older FIPS releases.</p><button onclick={() => loadConfig(true)}>Try again</button></article>
           {:else if config && guided}
             <div class="settings-header">
-              <div><span>ACTIVE SOURCE</span><strong>{config.source === "managed" ? "Managed by FIPS Monitor" : "Operator configuration"}</strong><code>{config.source === "managed" ? config.managed_path : config.base_path}</code></div>
+              <div><span>ACTIVE SOURCE</span><strong>{config.source === "managed" ? "Managed by FIPS" : "Operator configuration"}</strong><code>{config.source === "managed" ? config.managed_path : config.base_path}</code></div>
               <div class="segmented"><button class:active={settingsMode === "guided"} onclick={() => (settingsMode = "guided")}>Guided</button><button class:active={settingsMode === "yaml"} onclick={() => (settingsMode = "yaml")}>Advanced YAML</button></div>
             </div>
 
@@ -741,6 +983,48 @@
   </div>
 {/if}
 
+{#if onboardingOpen}
+  <div class="modal-backdrop onboarding-backdrop" role="presentation">
+    <section class="modal onboarding-modal" aria-labelledby="onboarding-title">
+      <button class="drawer-close" aria-label="Close onboarding" onclick={() => (onboardingOpen = false)}>×</button>
+      <div class="onboarding-mark"><Icon name="node" size={38} strokeWidth={1.3} /></div>
+      {#if snapshot.service.registration === "requires_approval"}
+        <span>ONE-TIME MACOS APPROVAL</span>
+        <h2 id="onboarding-title">Allow FIPS in Background Items</h2>
+        <p>macOS requires an administrator to approve the bundled FIPS service. Open Login Items, enable FIPS, then return here. The app and node remain inside the FIPS application bundle.</p>
+        <ol class="approval-steps"><li>Open System Settings.</li><li>Under “Allow in the Background,” enable FIPS.</li><li>Return here and continue.</li></ol>
+        <div class="modal-actions"><button onclick={openBackgroundSettings}>Open System Settings</button><button class="primary" disabled={installBusy} onclick={() => pendingInstallAction === "migrate" ? installNode(true) : pendingInstallAction === "existing" ? useExistingNode() : installNode(false)}>{installBusy ? "Checking…" : "I’ve approved it"}</button></div>
+      {:else if snapshot.service.registration === "bundle_incomplete"}
+        <span>MONITOR-ONLY BUILD</span>
+        <h2 id="onboarding-title">The bundled node is not in this build</h2>
+        <p><code>tauri dev</code> and the legacy App Store build remain monitor-only. Build or install the Developer ID edition to get the one-click, app-managed FIPS node.</p>
+        <div class="modal-actions"><button class="primary" onclick={() => (onboardingOpen = false)}>Continue monitoring</button></div>
+      {:else if snapshot.service.ownership === "external" || snapshot.service.installation === "external"}
+        <span>EXISTING FIPS INSTALLATION</span>
+        <h2 id="onboarding-title">Your node is already here</h2>
+        <p>FIPS found the package-managed node in <code>/usr/local</code>. You can keep using it unchanged, or move its identity and configuration into the app-managed installation.</p>
+        <div class="migration-options">
+          <button disabled={installBusy} onclick={useExistingNode}><strong>Use existing installation</strong><small>Keep the current package, paths, identity, and service.</small></button>
+          <button disabled={installBusy} onclick={() => installNode(true)}><strong>Move into FIPS</strong><small>Stop the package service, preserve its data, and start the bundled node. Rolls back if startup fails.</small></button>
+        </div>
+        <div class="modal-actions"><button onclick={() => (onboardingOpen = false)}>Not now</button></div>
+      {:else if snapshot.service.ownership === "conflict"}
+        <span>INSTALLATION NEEDS ATTENTION</span>
+        <h2 id="onboarding-title">Two FIPS services are active</h2>
+        <p>Only one node may own the local sockets, ports, TUN interface, and DNS configuration. FIPS can stop the duplicate and restore the selected installation.</p>
+        <div class="modal-actions"><button onclick={() => (onboardingOpen = false)}>Cancel</button><button class="primary" disabled={installBusy} onclick={repairNode}>{installBusy ? "Repairing…" : "Repair installation"}</button></div>
+      {:else}
+        <span>WELCOME TO FIPS</span>
+        <h2 id="onboarding-title">Run a FIPS node on this Mac</h2>
+        <p>The FIPS Mac app includes the node. Installation creates a persistent identity and a local UDP transport; TUN, DNS, LAN discovery, and remote rendezvous stay off until you choose to enable them.</p>
+        <div class="install-summary"><div><Icon name="node" size={18}/><span><strong>Included node</strong><small>No Homebrew, package installer, or Terminal.</small></span></div><div><Icon name="settings" size={18}/><span><strong>Safe starting point</strong><small>Network-changing features begin disabled.</small></span></div><div><Icon name="overview" size={18}/><span><strong>Always visible</strong><small>Start, stop, configure, and inspect from this app.</small></span></div></div>
+        <div class="modal-actions"><button onclick={() => (onboardingOpen = false)}>Not now</button><button class="primary" disabled={installBusy} onclick={() => installNode(false)}>{installBusy ? "Installing…" : "Install FIPS Node"}</button></div>
+      {/if}
+      {#if installMessage}<p class="install-message">{installMessage}</p>{/if}
+    </section>
+  </div>
+{/if}
+
 {#if toast}<button class="toast" onclick={() => (toast = "")}>{toast}<span>×</span></button>{/if}
 
 <style>
@@ -772,7 +1056,8 @@
   .content { position: relative; height: calc(100vh - 88px); padding: 23px 30px 34px; overflow: auto; }
   .health-banner { display: flex; align-items: center; gap: 13px; margin-bottom: 18px; padding: 12px 15px; border: 1px solid #59482c; border-radius: 9px; background: #1e1a11; }.health-banner.permission_denied,.health-banner.incompatible { border-color: #59322d; background: #201311; }.health-banner strong { font-size: 12px; }.health-banner p { margin: 2px 0 0; color: #a59476; font-size: 11px; }.health-banner button,.health-banner .hint { margin-left: auto; font-size: 10px; }.health-symbol { display: grid; place-items: center; width: 27px; height: 27px; border-radius: 50%; color: #e9bd67; background: #322a18; }
   .hero-grid { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(220px, .72fr); gap: 14px; }.node-card,.tun-card,.panel,.stat-grid article { border: 1px solid #1d3029; border-radius: 11px; background: linear-gradient(145deg, rgba(17,33,27,.94), rgba(10,22,18,.96)); box-shadow: 0 15px 40px rgba(0,0,0,.08); }.node-card,.tun-card { padding: 18px 19px; }.card-heading,.panel-title,.review-head,.transport-title { display: flex; align-items: flex-start; justify-content: space-between; }.pill { padding: 4px 8px; border-radius: 100px; color: #92a59e; background: #182721; font-size: 9px; font-weight: 650; }.pill.healthy { color: #57e5b1; background: rgba(60,192,143,.1); }.pill.degraded,.pill.stopped { color: #e3b863; background: rgba(227,184,99,.1); }.pill.permission_denied,.pill.incompatible { color: #e9897b; background: rgba(233,137,123,.1); }
-  .identity-row { display: flex; align-items: center; gap: 15px; margin: 19px 0 20px; }.identity-copy { min-width: 0; flex: 1; }.identity-row h2 { margin: 0 0 3px; overflow: hidden; font-size: 16px; font-weight: 580; text-overflow: ellipsis; white-space: nowrap; }.identity-key { display: flex; min-width: 0; align-items: flex-start; gap: 6px; }.identity-key code { min-width: 0; overflow-wrap: anywhere; line-height: 1.45; }.identity-row code,.tun-route code { color: #718980; font-size: 10px; }.copy-button { display: grid; flex: 0 0 25px; width: 25px; height: 25px; margin-top: -5px; padding: 0; place-items: center; border-color: transparent; color: #718980; background: transparent; }.copy-button:hover:not(:disabled) { color: #66ddb1; background: #13251f; }.node-glyph { display: grid; flex: 0 0 48px; height: 48px; place-items: center; color: #52dfa9; filter: drop-shadow(0 0 8px rgba(75,221,166,.16)); }
+  .service-control-row { display: flex; align-items: center; justify-content: space-between; min-height: 37px; margin: 12px 0 0; padding: 8px 0; border-top: 1px solid #1d3029; border-bottom: 1px solid #1d3029; }.service-control-row>div:first-child { display: flex; align-items: baseline; gap: 8px; }.service-control-row strong { font-size: 10px; font-weight: 590; }.service-control-row>div:first-child span { color: #657b72; font-size: 9px; }.service-actions { display: flex; align-items: center; gap: 8px; }.service-switch { position: relative; display: block; width: 31px; height: 17px; cursor: pointer; }.service-switch input { position: absolute; opacity: 0; pointer-events: none; }.service-switch i { position: absolute; inset: 0; border-radius: 20px; background: #263630; transition: .2s; }.service-switch i::after { content: ""; position: absolute; top: 3px; left: 3px; width: 11px; height: 11px; border-radius: 50%; background: #778981; transition: .2s; }.service-switch input:checked+i { background: #2c765d; }.service-switch input:checked+i::after { left: 17px; background: #69e2b6; }.service-switch input:focus-visible+i { outline: 2px solid #58cda3; outline-offset: 2px; }.service-switch:has(input:disabled) { cursor: default; opacity: .45; }.service-restart { display: flex; align-items: center; gap: 5px; padding: 4px 7px; border-color: #263a32; color: #8da198; background: transparent; font-size: 9px; }.service-restart:hover:not(:disabled) { color: #cce4da; background: #13251f; }
+  .identity-row { display: flex; align-items: center; gap: 15px; margin: 15px 0 20px; }.identity-copy { min-width: 0; flex: 1; }.identity-row h2 { margin: 0 0 3px; overflow: hidden; font-size: 16px; font-weight: 580; text-overflow: ellipsis; white-space: nowrap; }.identity-key { display: flex; min-width: 0; align-items: flex-start; gap: 6px; }.identity-key code { min-width: 0; overflow-wrap: anywhere; line-height: 1.45; }.identity-row code,.tun-route code { color: #718980; font-size: 10px; }.copy-button { display: grid; flex: 0 0 25px; width: 25px; height: 25px; margin-top: -5px; padding: 0; place-items: center; border-color: transparent; color: #718980; background: transparent; }.copy-button:hover:not(:disabled) { color: #66ddb1; background: #13251f; }.node-glyph { display: grid; flex: 0 0 48px; height: 48px; place-items: center; color: #52dfa9; filter: drop-shadow(0 0 8px rgba(75,221,166,.16)); }
   .metrics { display: grid; gap: 16px; padding-top: 14px; border-top: 1px solid #1d3029; }.metrics.four { grid-template-columns: repeat(4,1fr); }.metrics div { display: flex; flex-direction: column; gap: 5px; }.metrics span,.quality-row>span { color: #586e65; font-size: 8px; font-weight: 700; letter-spacing: .13em; }.metrics strong { font-size: 12px; font-weight: 570; }
   .tun-card { display: flex; min-width: 0; flex-direction: column; }.tun-name { margin: 24px 0 3px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 25px; font-weight: 500; }.tun-card>p { color: #62776e; font-size: 10px; }.tun-route { min-width: 0; margin-top: auto; padding-top: 15px; border-top: 1px solid #1d3029; }.tun-route span { display: block; margin-bottom: 4px; color: #53685f; font-size: 8px; text-transform: uppercase; letter-spacing: .12em; }.tun-route code { display: block; max-width: 100%; overflow-wrap: anywhere; line-height: 1.45; word-break: break-word; }
   .stat-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 11px; margin-top: 12px; }.stat-grid article { min-width: 0; display: flex; align-items: flex-end; justify-content: space-between; padding: 13px 14px; }.stat-grid article>div:first-child { display: flex; flex-direction: column; gap: 5px; }.stat-grid span { color: #536a61; font-size: 7px; font-weight: 700; letter-spacing: .11em; }.stat-grid strong { font-size: 21px; font-weight: 540; }.stat-grid svg { width: 45%; height: 31px; overflow: visible; }.stat-grid polyline,.traffic-chart polyline { fill: none; stroke: #48dba6; stroke-width: 1.7; vector-effect: non-scaling-stroke; }.transport-dots { display: flex; gap: 4px; padding-bottom: 5px; }.transport-dots i { width: 5px; height: 5px; border-radius: 50%; background: #4bdca7; }
@@ -785,9 +1070,11 @@
   .detail-drawer { position: fixed; z-index: 5; top: 88px; right: 0; bottom: 0; width: 315px; padding: 24px; border-left: 1px solid #24372f; background: #0c1814; box-shadow: -20px 0 50px rgba(0,0,0,.28); }.drawer-close { position: absolute; top: 15px; right: 15px; border: 0; background: transparent; color: #71857e; font-size: 20px; }.detail-drawer h2 { margin: 0 0 3px; font-size: 17px; }.detail-drawer>code { display: block; overflow-wrap: anywhere; color: #5b7168; font-size: 8px; }.detail-drawer dl,.transport-card dl { margin: 25px 0; }.detail-drawer dl div,.transport-card dl div { display: grid; grid-template-columns: 1fr 1.3fr; gap: 8px; padding: 9px 0; border-bottom: 1px solid #1b2d26; font-size: 10px; }.detail-drawer dt,.transport-card dt { color: #566b63; }.detail-drawer dd,.transport-card dd { margin: 0; overflow-wrap: anywhere; color: #a8bbb4; text-align: right; }.danger { width: 100%; border-color: #53342e; color: #e58576; background: #241512; }
   .lan-diagnostics { margin-bottom: 18px; padding: 2px 0 16px; border-bottom: 1px solid #22382f; }.lan-diagnostics-head { display: flex; align-items: flex-start; justify-content: space-between; }.lan-diagnostics-head>div>span,.lan-diagnostics.unsupported>div>span,.skip-reasons>span:first-child { color: #61776e; font-size: 9px; font-weight: 700; letter-spacing: .16em; }.lan-diagnostics h2 { margin: 5px 0 4px; font-size: 17px; font-weight: 580; }.lan-diagnostics-head p,.lan-diagnostics.unsupported p { margin: 0; color: #647a71; font-size: 10px; }.diagnostic-metrics { display: grid; grid-template-columns: minmax(170px,1.8fr) repeat(5,minmax(75px,1fr)); gap: 18px; margin-top: 17px; padding: 13px 0; border-top: 1px solid #1b3028; border-bottom: 1px solid #1b3028; }.diagnostic-metrics>div { min-width: 0; display: flex; flex-direction: column; gap: 5px; }.diagnostic-metrics span { color: #536a61; font-size: 7.5px; font-weight: 700; letter-spacing: .1em; }.diagnostic-metrics strong { overflow: hidden; font-size: 11px; font-weight: 570; text-overflow: ellipsis; white-space: nowrap; }.diagnostic-warning { position: relative; margin-top: 13px; padding: 2px 120px 2px 12px; border-left: 2px solid #d6a955; color: #d9b66f; }.diagnostic-warning strong { font-size: 10.5px; }.diagnostic-warning p,.diagnostic-note { margin: 4px 0 0; color: #9b8760; font-size: 10px; line-height: 1.45; }.diagnostic-warning button { position: absolute; top: 1px; right: 0; padding: 6px 9px; font-size: 9px; }.diagnostic-note { color: #73877f; }.skip-reasons { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-top: 12px; color: #73877f; font-size: 9px; }.skip-reasons>span:first-child { margin-right: 3px; }.skip-reasons b { color: #a5b9b1; }.lan-diagnostics.unsupported { padding-top: 2px; }.transport-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 13px; }.transport-card { display: grid; grid-template-columns: 43px 1fr; gap: 15px; }.transport-icon { display: grid; place-items: center; width: 43px; height: 43px; border: 1px solid #284039; border-radius: 9px; color: #54d9a8; background: #10211b; }.transport-title { grid-column: 2; }.transport-title span:first-child { color: #5bd7aa; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .13em; }.transport-title h3 { margin: 5px 0; font-size: 13px; }.transport-card dl { grid-column: 1 / -1; margin-bottom: 0; }
   .settings-shell { max-width: 940px; margin: 0 auto; }.settings-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; padding: 0 0 15px; border-bottom: 1px solid #1b3028; }.settings-header>div:first-child { display: flex; min-width: 0; flex-direction: column; gap: 3px; }.settings-header strong { font-size: 13px; font-weight: 590; }.settings-header code { overflow: hidden; color: #60766d; font-size: 9.5px; text-overflow: ellipsis; white-space: nowrap; }.segmented { display: flex; flex: 0 0 auto; padding: 3px; border: 1px solid #20332b; border-radius: 7px; background: #091511; }.segmented button { padding: 6px 10px; border: 0; background: transparent; font-size: 10.5px; }.segmented button.active { color: #dff8ee; background: #183027; }
+  .application-settings { margin-bottom: 25px; padding-bottom: 22px; border-bottom: 1px solid #20342c; }.application-title { display: flex; align-items: flex-start; justify-content: space-between; }.ownership-badge { flex: 0 0 auto; margin-top: 4px; padding: 5px 8px; border-radius: 20px; color: #78c9aa; background: #132a21; font-size: 9px; }.application-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 24px; }.installation-row { display: flex; align-items: center; justify-content: space-between; min-height: 59px; border-top: 1px solid #192b24; border-bottom: 1px solid #192b24; }.installation-row>div:first-child { display: flex; min-width: 0; flex-direction: column; gap: 4px; }.installation-row strong { font-size: 12px; }.installation-row small { max-width: 610px; overflow: hidden; color: #6b8078; font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }.node-settings-heading { display: flex; align-items: baseline; gap: 13px; margin-bottom: 15px; }.node-settings-heading>span { color: #61776e; font-size: 9px; font-weight: 700; letter-spacing: .16em; }.node-settings-heading p { margin: 0; color: #60756d; font-size: 10.5px; }
   .settings-layout { display: grid; grid-template-columns: 188px minmax(0,1fr); gap: 0; }.settings-nav { align-self: start; padding: 3px 20px 3px 0; border-right: 1px solid #1a2d26; }.settings-nav button { padding: 10px 11px; border-radius: 6px; font-size: 12px; line-height: 1.25; }.settings-nav button.active { color: #e9fff7; background: #13251e; }.settings-nav button em { font-size: 10.5px; }.settings-form { min-width: 0; min-height: 392px; padding: 3px 0 28px 28px; }.form-title { margin-bottom: 14px; padding-bottom: 15px; border-bottom: 1px solid #1d3029; }.form-title h2 { margin: 5px 0 6px; font-size: 18px; font-weight: 580; letter-spacing: -.01em; }.form-title p,.modal>p { max-width: 620px; margin: 0; color: #71867e; font-size: 11.5px; line-height: 1.5; }.toggle-row { position: relative; display: flex; align-items: center; justify-content: space-between; min-height: 59px; padding: 11px 0; border-bottom: 1px solid #192b24; cursor: pointer; }.toggle-row>span { display: flex; flex-direction: column; gap: 4px; }.toggle-row strong { font-size: 12px; font-weight: 580; }.toggle-row small { color: #6b8078; font-size: 10.5px; line-height: 1.35; }.toggle-row input { position: absolute; opacity: 0; }.toggle-row>i { position: relative; width: 31px; height: 17px; border-radius: 20px; background: #263630; transition: .2s; }.toggle-row>i::after { content: ""; position: absolute; top: 3px; left: 3px; width: 11px; height: 11px; border-radius: 50%; background: #778981; transition: .2s; }.toggle-row input:checked+i { background: #2c765d; }.toggle-row input:checked+i::after { left: 17px; background: #69e2b6; }.toggle-row.compact { min-height: 40px; border: 0; }.field { display: flex; flex-direction: column; gap: 6px; margin-top: 14px; }.field>span { color: #7a8f87; font-size: 10.5px; font-weight: 600; }.field input,.field select,.path-field input { width: 100%; height: 36px; padding: 0 10px; border: 1px solid #263a32; border-radius: 6px; outline: 0; color: #c8d9d2; background: #091511; font-size: 11.5px; }.field input:focus,.field select:focus,.path-field input:focus,textarea:focus { border-color: #378a6b; }.field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }.info-box { margin-top: 18px; padding: 3px 0 3px 12px; border-left: 2px solid #2f6652; color: #789087; font-size: 10.5px; line-height: 1.5; }.inline-warning { display: flex; align-items: center; gap: 14px; margin: 10px 0; padding: 10px 0 10px 12px; border-left: 2px solid #d3a651; }.inline-warning>div { min-width: 0; flex: 1; }.inline-warning strong { color: #e3bd72; font-size: 10.5px; }.inline-warning p { margin: 3px 0 0; color: #9a855e; font-size: 10px; line-height: 1.4; }.inline-warning button { flex: 0 0 auto; padding: 6px 9px; color: #dfbc76; font-size: 9px; }.transport-setting { margin: 0; padding: 0 0 15px; border-bottom: 1px solid #1d3029; }.transport-setting + .transport-setting { margin-top: 2px; }
   .peer-form-title { display: flex; align-items: flex-start; justify-content: space-between; }.peer-editor { margin: 0; padding: 15px 0 18px; border-bottom: 1px solid #20362d; }.peer-editor-title { display: flex; justify-content: space-between; }.peer-editor-title strong { font-size: 11px; }.danger-text { color: #df7e70; }.empty.embedded { min-height: 180px; border-top: 1px dashed #294038; border-bottom: 1px dashed #294038; border-radius: 0; }
   .yaml-panel { padding-left: 0; }.yaml-panel textarea { width: 100%; min-height: 415px; resize: vertical; padding: 14px; border: 1px solid #233831; border-radius: 6px; outline: 0; color: #b9d8ca; background: #06100d; font: 10.5px/1.58 ui-monospace, SFMono-Regular, Menlo, monospace; tab-size: 2; }.editor-footer { display: flex; justify-content: space-between; margin-top: 8px; color: #60756d; font-size: 9px; }.inline-error,.apply-message { margin: 10px 0; padding: 11px 13px; border: 1px solid #57342e; border-radius: 6px; color: #de8b7d; background: #201411; font-size: 10.5px; }.apply-message { border-color: #2a4c3d; color: #84cbb0; background: #102019; }.review-panel { margin-top: 14px; padding: 17px 0; border-top: 1px solid #244036; border-bottom: 1px solid #244036; }.review-head h2 { margin: 5px 0 0; font-size: 15px; }.impact { padding: 5px 9px; border-radius: 20px; color: #76d4b2; background: #143025; font-size: 9px; }.impact.restart { color: #dfb567; background: #2a2214; }.diff-list { margin-top: 14px; }.diff-list>div { display: grid; grid-template-columns: minmax(120px,.65fr) 1.4fr; gap: 15px; padding: 10px 0; border-top: 1px solid #1c3028; font-size: 9px; }.diff-list>div>span { display: grid; grid-template-columns: 1fr 15px 1fr; gap: 6px; min-width: 0; }.diff-list del,.diff-list ins { overflow: hidden; color: #967b76; text-decoration: none; text-overflow: ellipsis; }.diff-list ins { color: #7bb69f; }.diff-list b { color: #536960; text-align: center; }.warnings { color: #d2ae68; font-size: 9px; }.validation-errors { margin-top: 14px; }.validation-errors>div { padding: 10px 12px; border: 1px solid #54332e; border-radius: 6px; background: #201411; }.validation-errors code { color: #e29183; font-size: 9px; }.validation-errors p { margin: 5px 0 0; color: #b9877f; font-size: 9px; line-height: 1.45; }.settings-actions { display: flex; align-items: center; gap: 7px; margin: 11px 0 18px; padding-top: 2px; }.settings-actions>span { flex: 1; }.settings-action { padding: 6px 10px; font-size: 10.5px; }.developer-settings { margin-top: 8px; padding: 13px 0 0; border-top: 1px solid #1b3028; }.developer-settings summary { cursor: pointer; color: #849991; font-size: 11px; }.developer-settings p { margin: 12px 0; color: #657a72; font-size: 10.5px; }.path-field { display: flex; gap: 8px; }.path-field input { flex: 1; }.upgrade-card { min-height: 300px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }.upgrade-card h2 { margin-bottom: 8px; font-size: 16px; }.upgrade-card p { max-width: 440px; color: #7c9088; font-size: 11px; }.upgrade-icon { display: grid; place-items: center; width: 48px; height: 48px; margin-bottom: 14px; border-radius: 50%; color: #e0b565; background: #2a2214; }.muted { color: #5f746c !important; }
   .modal-backdrop { position: fixed; z-index: 20; inset: 0; display: grid; place-items: center; background: rgba(1,6,4,.72); backdrop-filter: blur(5px); }.modal { position: relative; width: min(500px,calc(100vw - 50px)); padding: 25px; border: 1px solid #2b4138; border-radius: 13px; background: #0d1b17; box-shadow: 0 30px 80px rgba(0,0,0,.45); }.modal h2 { margin: 6px 0; font-size: 20px; }.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 22px; padding-top: 15px; border-top: 1px solid #1d3029; }.toast { position: fixed; z-index: 30; right: 22px; bottom: 21px; display: flex; gap: 18px; align-items: center; max-width: 420px; border-color: #315447; color: #bee0d3; background: #132820; box-shadow: 0 16px 50px rgba(0,0,0,.35); font-size: 10px; }.toast span { color: #688178; }.floating-error { position: fixed; right: 25px; bottom: 24px; padding: 10px 13px; border: 1px solid #51342f; border-radius: 8px; color: #dc897b; background: #201411; font-size: 9px; }.loading { display: grid; min-height: 260px; place-items: center; color: #60756d; font-size: 11px; }
+  .onboarding-backdrop { background: rgba(1,6,4,.83); }.onboarding-modal { width: min(610px,calc(100vw - 50px)); padding: 30px; }.onboarding-modal>span { color: #5fd7aa; font-size: 9px; font-weight: 750; letter-spacing: .18em; }.onboarding-modal h2 { margin: 8px 0; font-size: 23px; }.onboarding-modal>p { max-width: none; }.onboarding-modal code { color: #80aa9a; }.onboarding-mark { display: grid; width: 52px; height: 52px; margin-bottom: 20px; place-items: center; border: 1px solid #285041; border-radius: 14px; color: #59dba9; background: #10261e; }.install-summary { display: grid; grid-template-columns: repeat(3,1fr); gap: 12px; margin-top: 22px; }.install-summary>div { display: flex; align-items: flex-start; gap: 9px; padding-top: 12px; border-top: 1px solid #20362d; color: #55cfa1; }.install-summary span,.migration-options span { display: flex; flex-direction: column; gap: 4px; }.install-summary strong { color: #dcebe5; font-size: 10.5px; }.install-summary small { color: #687e75; font-size: 9px; line-height: 1.4; }.migration-options { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 21px; }.migration-options button { display: flex; min-height: 94px; flex-direction: column; gap: 7px; padding: 15px; border-color: #294239; text-align: left; }.migration-options button:hover:not(:disabled) { border-color: #3a755e; background: #14271f; }.migration-options strong { font-size: 12px; }.migration-options small { color: #71867e; font-size: 10px; line-height: 1.45; }.approval-steps { margin: 20px 0 0; padding: 14px 14px 14px 34px; border-top: 1px solid #20362d; border-bottom: 1px solid #20362d; color: #94a79f; font-size: 10.5px; line-height: 1.8; }.install-message { margin: 13px 0 0 !important; color: #84cbb0 !important; font-size: 10px !important; }
   @media (max-width: 900px) { .app-shell { grid-template-columns: 190px 1fr; }.hero-grid,.dashboard-grid { grid-template-columns: 1fr; }.tun-card { min-height: 180px; }.stat-grid { grid-template-columns: repeat(2,1fr); }.lan-summary { grid-template-columns: 9px 1fr auto; }.lan-summary>span:nth-of-type(3),.lan-summary>span:nth-of-type(4) { display: none; }.diagnostic-metrics { grid-template-columns: repeat(3,1fr); }.transport-grid { grid-template-columns: 1fr; }.content { padding-left: 20px; padding-right: 20px; }.metrics.four { grid-template-columns: repeat(2,1fr); }.settings-layout { grid-template-columns: 156px 1fr; }.settings-nav { padding-right: 12px; }.settings-form { padding-left: 20px; } }
 </style>

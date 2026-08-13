@@ -1,8 +1,13 @@
 # Mac App Store and TestFlight
 
-FIPS Monitor uses bundle identifier `com.paper-robin.fips-monitor`, Apple
-Developer team `8Z6Q2LZ77W`, version `2026.8.6`, and build `1`. Its minimum
-supported operating system is macOS 13.
+FIPS Mac is shown to users as **FIPS**. Apple Developer team `8Z6Q2LZ77W`,
+bundle identifier `com.paper-robin.fips-mac`, version `2026.8.6`, build `1`,
+and the macOS 13 minimum remain current.
+
+This remains a **monitor-only** distribution track. It does not contain or
+register the Developer ID edition's root FIPS node and lifecycle controller.
+Delivering the one-app node through TestFlight would require the separate
+Network Extension architecture described in the project roadmap.
 
 The App Store configuration is deliberately separate from normal development
 and Developer ID builds. Only builds made with `tauri.appstore.conf.json` are
@@ -28,13 +33,13 @@ granted by the daemon to members of the local `fips` group.
 Apple requires usage information for every temporary exception. Use this as the
 basis of the App Sandbox Entitlement Usage Information response:
 
-> FIPS Monitor is a local status and configuration client for the separately
+> FIPS is a local status and configuration client for the separately
 > installed FIPS networking daemon. It connects only to the daemon-owned Unix
 > domain socket at `/private/var/run/fips/control.sock`; it does not enumerate,
 > create, delete, or modify other files in `/private/var/run`. The daemon uses
 > POSIX ownership and the local `fips` group to authorize the signed-in user.
 > The exception enables status queries and explicitly confirmed configuration
-> operations. Install and start FIPS, then launch FIPS Monitor to assess it.
+> operations. Install and start FIPS, then launch the FIPS Mac app to assess it.
 
 Before submitting the build for review, file a Feedback Assistant report for
 the temporary exception and add its ID to that explanation. The long-term fix
@@ -48,9 +53,10 @@ TestFlight installation.
 
 ## Apple account setup
 
-1. Create the explicit App ID `com.paper-robin.fips-monitor` for team
-   `8Z6Q2LZ77W` and enable App Sandbox.
-2. Create the FIPS Monitor app record in App Store Connect using that bundle ID.
+1. Ensure the explicit `com.paper-robin.fips-mac` App ID exists for team
+   `8Z6Q2LZ77W` and has App Sandbox enabled.
+2. Create the FIPS app record in App Store Connect using
+   `com.paper-robin.fips-mac`.
 3. Sign in to the Paper Robin team under **Xcode → Settings → Accounts**.
 4. Ensure these identities are available in the keychain:
    - `Apple Distribution`
@@ -59,13 +65,13 @@ TestFlight installation.
 
 The repository's helper generates a temporary Xcode project only to ask Xcode
 for a managed Mac App Store distribution profile. It never uploads or packages
-that helper as FIPS Monitor.
+that helper as FIPS.
 
 ```sh
 bun run tauri:profile:app-store
 ```
 
-The generated `src-tauri/appstore/FIPSMonitor.provisionprofile` is ignored by
+The generated `src-tauri/appstore/FIPS.provisionprofile` is ignored by
 Git. Regenerate it after capabilities change or before it expires.
 
 ## Build and verify
@@ -94,7 +100,7 @@ profile, and installer signature.
 The resulting package is written to:
 
 ```text
-src-tauri/target/universal-apple-darwin/release/bundle/macos/FIPS Monitor-2026.8.6-1.pkg
+src-tauri/target/universal-apple-darwin/release/bundle/macos/FIPS-2026.8.6-1.pkg
 ```
 
 ## Upload

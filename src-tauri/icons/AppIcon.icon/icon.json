@@ -1,0 +1,79 @@
+{
+  "fill" : {
+    "linear-gradient" : [
+      "display-p3:0.11371,0.19153,0.16418,1.00000",
+      "display-p3:0.03149,0.06009,0.05258,1.00000"
+    ],
+    "orientation" : {
+      "start" : {
+        "x" : 0.5,
+        "y" : 0
+      },
+      "stop" : {
+        "x" : 0.5,
+        "y" : 0.7
+      }
+    }
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "hidden" : false,
+          "image-name" : "01-live-node.svg",
+          "name" : "01-live-node"
+        }
+      ],
+      "name" : "03-Live",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    },
+    {
+      "layers" : [
+        {
+          "hidden" : false,
+          "image-name" : "01-network-nodes.svg",
+          "name" : "01-network-nodes"
+        }
+      ],
+      "name" : "02-Nodes",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    },
+    {
+      "layers" : [
+        {
+          "image-name" : "01-rails 2.svg",
+          "name" : "01-rails 2"
+        }
+      ],
+      "name" : "01-Topology",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

@@ -1,12 +1,12 @@
 {
-  "identifier": "com.paper-robin.fips-monitor",
+  "identifier": "com.paper-robin.fips-mac",
   "bundle": {
     "category": "Utility",
     "macOS": {
       "entitlements": "./Entitlements.appstore.plist",
       "minimumSystemVersion": "13.0",
       "files": {
-        "embedded.provisionprofile": "./appstore/FIPSMonitor.provisionprofile"
+        "embedded.provisionprofile": "./appstore/FIPS.provisionprofile"
       },
       "signingIdentity": "Apple Distribution: PAPER ROBIN DI JEFFREY ERSKIN GARDNER & C. SAS (8Z6Q2LZ77W)"
     }

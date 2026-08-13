@@ -50,8 +50,7 @@ impl ControlClient {
         }
     }
 
-    #[cfg(test)]
-    fn with_timeout(socket_path: PathBuf, timeout: Duration) -> Self {
+    pub(crate) fn with_timeout(socket_path: PathBuf, timeout: Duration) -> Self {
         Self {
             socket_path,
             timeout,
@@ -137,7 +136,7 @@ pub fn resolve_socket_path(explicit: Option<PathBuf>) -> PathBuf {
     if let Some(path) = explicit {
         return path;
     }
-    if let Some(path) = std::env::var_os("FIPS_MONITOR_SOCKET") {
+    if let Some(path) = std::env::var_os("FIPS_MAC_SOCKET") {
         return PathBuf::from(path);
     }
     let candidates = [

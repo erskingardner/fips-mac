@@ -1,0 +1,20 @@
+#!/bin/zsh
+
+set -euo pipefail
+
+project_root=${0:A:h:h}
+if (( ! $+commands[rustup] )); then
+  print -u2 "rustup is required for the Developer ID build."
+  exit 1
+fi
+rustup_bin=${commands[rustup]:A:h}
+export PATH="$rustup_bin:$PATH"
+export RUSTUP_TOOLCHAIN=${RUSTUP_TOOLCHAIN:-stable}
+target=${FIPS_MAC_BUILD_TARGET:-universal-apple-darwin}
+
+cd "$project_root"
+TAURI_ENV_TARGET_TRIPLE="$target" bun run prepare:macos-bundle
+bun run tauri build \
+  --target "$target" \
+  --config src-tauri/tauri.developer-id.conf.json \
+  "$@"

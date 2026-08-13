@@ -12,6 +12,11 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: erskingardner/fips
+          ref: 3e7a0afbe45b3a475ab7b90edc1f5fab4494418a
+          path: fips-source
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
@@ -25,6 +30,7 @@ jobs:
       - run: bun run check
       - run: bun run test
       - run: cargo test --manifest-path src-tauri/Cargo.toml
+      - run: cargo test --manifest-path src-tauri/service/Cargo.toml
       - name: Build signed and notarized universal DMG
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -33,7 +39,8 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: bun run tauri build --target universal-apple-darwin --bundles dmg
+          FIPS_CHECKOUT_PATH: ${{ github.workspace }}/fips-source
+        run: bun run tauri:build:developer-id --bundles dmg
       - name: Verify universal slices, signing, Gatekeeper, and stapling
         shell: bash
         run: |
@@ -49,9 +56,15 @@ jobs:
           }
           trap cleanup EXIT
           hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount_dir" -quiet
-          app="$mount_dir/FIPS Monitor.app"
-          binary="$app/Contents/MacOS/fips-monitor"
+          app="$mount_dir/FIPS.app"
+          binary="$app/Contents/MacOS/fips-mac"
+          fips_binary="$app/Contents/MacOS/fips"
+          service_binary="$app/Contents/MacOS/fips-mac-service"
           test -d "$app"
+          test -x "$fips_binary"
+          test -x "$service_binary"
+          test -f "$app/Contents/Library/LaunchDaemons/com.paper-robin.fips-mac.node.plist"
+          test -f "$app/Contents/Library/LaunchDaemons/com.paper-robin.fips-mac.service-control.plist"
           codesign --verify --deep --strict --verbose=2 "$app"
           spctl --assess --type execute --verbose=2 "$app"
           xcrun stapler validate "$app"
@@ -59,6 +72,12 @@ jobs:
           archs="$(lipo -archs "$binary")"
           grep -qw arm64 <<<"$archs"
           grep -qw x86_64 <<<"$archs"
+          for bundled_binary in "$fips_binary" "$service_binary"; do
+            bundled_archs="$(lipo -archs "$bundled_binary")"
+            grep -qw arm64 <<<"$bundled_archs"
+            grep -qw x86_64 <<<"$bundled_archs"
+            codesign --verify --strict --verbose=2 "$bundled_binary"
+          done
           shasum -a 256 "$dmg" > "$dmg.sha256"
       - uses: softprops/action-gh-release@v2
         with:
