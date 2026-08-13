@@ -140,6 +140,34 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           FIPS_CHECKOUT_PATH: ${{ github.workspace }}/fips-source
         run: bun run tauri:build:developer-id --bundles dmg
+      - name: Notarize and staple the DMG
+        shell: bash
+        env:
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          dmgs=(src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg)
+          test "${#dmgs[@]}" -eq 1
+          dmg="${dmgs[0]}"
+          if [[ "$NOTARIZATION_MODE" == "api-key" ]]; then
+            xcrun notarytool submit "$dmg" \
+              --key "$APPLE_API_KEY_PATH" \
+              --key-id "$APPLE_API_KEY" \
+              --issuer "$APPLE_API_ISSUER" \
+              --wait
+          else
+            xcrun notarytool submit "$dmg" \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" \
+              --wait
+          fi
+          xcrun stapler staple "$dmg"
       - name: Verify universal slices, signing, Gatekeeper, and stapling
         shell: bash
         run: |
