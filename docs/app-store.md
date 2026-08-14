@@ -1,7 +1,7 @@
 # Mac App Store and TestFlight
 
 FIPS Mac is shown to users as **FIPS**. Apple Developer team `8Z6Q2LZ77W`,
-bundle identifier `com.paper-robin.fips-mac`, version `2026.8.14`, build `5`,
+bundle identifier `com.paper-robin.fips-mac`, version `2026.8.14`, build `6`,
 and the macOS 13 minimum remain current.
 
 This remains a **monitor-only** distribution track. It does not contain or

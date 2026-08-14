@@ -24,7 +24,11 @@
     Transport,
     ValidationResult,
   } from "$lib/types";
-  import { disconnectConfirmation, lifecyclePresentation } from "$lib/uiPolicy";
+  import {
+    disconnectConfirmation,
+    lifecyclePresentation,
+    shouldOpenInstallationOnboarding,
+  } from "$lib/uiPolicy";
   import {
     averageSmoothedLinkLoss,
     formatPacketLoss,
@@ -371,6 +375,7 @@
     try {
       const service = await invoke<ServiceStatus>("get_node_installation");
       snapshot = { ...snapshot, service };
+      if (shouldOpenInstallationOnboarding(service)) onboardingOpen = true;
     } catch (error) {
       installMessage = errorMessage(error);
     }
@@ -808,6 +813,10 @@
           {#if snapshot.health === "stopped"}
             {#if snapshot.service.available && !snapshot.service.running}
               <button disabled={serviceBusy} onclick={() => setServiceRunning(true)}>{serviceBusy ? serviceTransition : "Start FIPS"}</button>
+            {:else if lifecycle.action === "install"}
+              <button onclick={() => (onboardingOpen = true)}>Install FIPS</button>
+            {:else if lifecycle.action === "install_app"}
+              <button onclick={() => (onboardingOpen = true)}>Move to Applications</button>
             {:else}
               <button onclick={() => selectView("settings")}>Connection settings</button>
             {/if}
@@ -868,6 +877,8 @@
                 <button class="service-enable" disabled title="Install the signed FIPS app to enable lifecycle controls.">Installed app required</button>
               {:else if lifecycle.action === "install"}
                 <button class="service-enable" onclick={() => (onboardingOpen = true)}>Set up FIPS</button>
+              {:else if lifecycle.action === "install_app"}
+                <button class="service-enable" onclick={() => (onboardingOpen = true)}>Move to Applications</button>
               {:else if lifecycle.action === "repair"}
                 <button class="service-enable" disabled={installBusy} onclick={repairNode}>{installBusy ? "Repairing…" : "Repair"}</button>
               {/if}
@@ -998,7 +1009,8 @@
             <div class="installation-row">
               <div><strong>FIPS node installation</strong><small>{snapshot.service.detail ?? (snapshot.service.config_path ? `Configuration: ${snapshot.service.config_path}` : "Install and manage FIPS without using Terminal.")}</small></div>
               <div>
-                {#if snapshot.service.registration === "bundle_incomplete"}<button class="settings-action" disabled>Management helper unavailable</button>
+                {#if snapshot.service.registration === "app_not_installed"}<button class="primary settings-action" onclick={() => (onboardingOpen = true)}>Move to Applications</button>
+                {:else if snapshot.service.registration === "bundle_incomplete"}<button class="settings-action" disabled>Management helper unavailable</button>
                 {:else if snapshot.service.ownership === "none" || snapshot.service.installation === "not_installed"}<button class="primary settings-action" onclick={() => (onboardingOpen = true)}>Install FIPS</button>
                 {:else if snapshot.service.ownership === "external"}<button class="settings-action" onclick={() => (onboardingOpen = true)}>{snapshot.service.available ? "Manage installation" : "Enable controls"}</button>
                 {:else if snapshot.service.ownership === "conflict"}<button class="settings-action" disabled={installBusy} onclick={repairNode}>Repair</button>
@@ -1131,6 +1143,11 @@
         <p>macOS requires an administrator to approve FIPS’s management helper. The node itself remains the standard <code>com.fips.daemon</code> installation in <code>/usr/local</code>.</p>
         <ol class="approval-steps"><li>Open System Settings.</li><li>Under “Allow in the Background,” enable FIPS.</li><li>Return here and continue.</li></ol>
         <div class="modal-actions"><button onclick={openBackgroundSettings}>Open System Settings</button><button class="primary" disabled={installBusy} onclick={() => pendingInstallAction === "existing" ? useExistingNode() : installNode()}>{installBusy ? "Checking…" : "I’ve approved it"}</button></div>
+      {:else if snapshot.service.registration === "app_not_installed"}
+        <span>FINISH INSTALLING FIPS</span>
+        <h2 id="onboarding-title">Move FIPS to Applications</h2>
+        <p>FIPS is running outside the system Applications folder. Quit the app, drag <code>FIPS.app</code> into <code>/Applications</code>, then open it there. macOS only allows the bundled management helper to install and control the node from that location.</p>
+        <div class="modal-actions"><button class="primary" onclick={() => (onboardingOpen = false)}>Got it</button></div>
       {:else if snapshot.service.registration === "bundle_incomplete"}
         <span>MONITOR-ONLY BUILD</span>
         <h2 id="onboarding-title">Management is not in this build</h2>
@@ -1147,9 +1164,9 @@
         <p>Only one node may own the local sockets, ports, TUN interface, and DNS configuration. FIPS can stop the duplicate and restore the selected installation.</p>
         <div class="modal-actions"><button onclick={() => (onboardingOpen = false)}>Cancel</button><button class="primary" disabled={installBusy} onclick={repairNode}>{installBusy ? "Repairing…" : "Repair installation"}</button></div>
       {:else}
-        <span>WELCOME TO FIPS</span>
-        <h2 id="onboarding-title">Run a FIPS node on this Mac</h2>
-        <p>FIPS will open the standard macOS installer and use the normal upstream layout: binaries in <code>/usr/local/bin</code>, configuration in <code>/usr/local/etc/fips</code>, and the <code>com.fips.daemon</code> LaunchDaemon.</p>
+        <span>NO FIPS NODE FOUND</span>
+        <h2 id="onboarding-title">Install FIPS on this Mac</h2>
+        <p>No standard FIPS node is installed on this Mac. FIPS will open the macOS installer and use the normal upstream layout: binaries in <code>/usr/local/bin</code>, configuration in <code>/usr/local/etc/fips</code>, and the <code>com.fips.daemon</code> LaunchDaemon.</p>
         <div class="install-summary"><div><Icon name="node" size={18}/><span><strong>Standard installer</strong><small>The same package and paths documented by FIPS.</small></span></div><div><Icon name="settings" size={18}/><span><strong>One installation</strong><small>No app-private copy or migration path.</small></span></div><div><Icon name="overview" size={18}/><span><strong>Managed here</strong><small>Monitor, configure, start, stop, and restart.</small></span></div></div>
         <div class="modal-actions"><button onclick={() => (onboardingOpen = false)}>Not now</button><button class="primary" disabled={installBusy} onclick={installNode}>{installBusy ? "Installer open…" : "Open FIPS Installer"}</button></div>
       {/if}

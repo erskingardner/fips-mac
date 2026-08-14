@@ -1,9 +1,5 @@
 export type Health =
-  | "healthy"
-  | "degraded"
-  | "stopped"
-  | "incompatible"
-  | "permission_denied";
+  "healthy" | "degraded" | "stopped" | "incompatible" | "permission_denied";
 
 export interface ServiceStatus {
   available: boolean;
@@ -16,10 +12,22 @@ export interface ServiceStatus {
   last_exit_status?: number;
   detail?: string;
   ownership: "app_managed" | "external" | "none" | "conflict" | "unknown";
-  installation: "standard" | "app_managed" | "external" | "not_installed" | "conflict" | "checking";
+  installation:
+    | "standard"
+    | "app_managed"
+    | "external"
+    | "not_installed"
+    | "conflict"
+    | "checking";
   can_migrate: boolean;
   config_path?: string;
-  registration: "enabled" | "requires_approval" | "not_registered" | "bundle_incomplete" | "unsupported";
+  registration:
+    | "enabled"
+    | "requires_approval"
+    | "not_registered"
+    | "app_not_installed"
+    | "bundle_incomplete"
+    | "unsupported";
 }
 
 export interface AppPreferences {

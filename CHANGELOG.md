@@ -9,6 +9,26 @@ number.
 
 ## [Unreleased]
 
+## [2026.8.14-2] - 2026-08-14
+
+### Changed
+
+- Simplified public release tags to `v<version>` for the first release on a
+  date and `v<version>-2`, `-3`, and so on for additional same-day releases.
+  Apple’s internal bundle build number no longer appears in the tag.
+
+### Fixed
+
+- Made a clean installation open setup from the authoritative node-installation
+  state instead of relying on a startup event that could fire before the
+  dashboard registered its listener.
+- Added a persistent **Install FIPS** action whenever no node is installed.
+- Distinguished an app running outside `/Applications` from a development
+  bundle that does not contain installer resources, with actionable onboarding
+  for each state.
+- Clarified first-run onboarding when no FIPS node is installed, without
+  misclassifying macOS's pre-registration helper status as a damaged app.
+
 ## [2026.8.14+5] - 2026-08-14
 
 ### Added
@@ -99,7 +119,8 @@ number.
   configuration, safe apply and rollback, and package-installation migration.
 - Signed, notarized, and stapled DMG publishing through GitHub Actions.
 
-[Unreleased]: https://github.com/erskingardner/fips-mac/compare/v2026.8.14-build.5...HEAD
+[Unreleased]: https://github.com/erskingardner/fips-mac/compare/v2026.8.14-2...HEAD
+[2026.8.14-2]: https://github.com/erskingardner/fips-mac/compare/v2026.8.14-build.5...v2026.8.14-2
 [2026.8.14+5]: https://github.com/erskingardner/fips-mac/compare/v2026.8.13-build.3...v2026.8.14-build.5
 [2026.8.13+3]: https://github.com/erskingardner/fips-mac/compare/v2026.8.13...v2026.8.13-build.3
 [2026.8.13+2]: https://github.com/erskingardner/fips-mac/releases/tag/v2026.8.13

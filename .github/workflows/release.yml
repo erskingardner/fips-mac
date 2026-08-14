@@ -147,10 +147,20 @@ jobs:
           set -euo pipefail
           package_version="$(bun -e 'console.log(require("./package.json").version)')"
           tauri_version="$(bun -e 'console.log(require("./src-tauri/tauri.conf.json").version)')"
-          bundle_version="$(bun -e 'console.log(require("./src-tauri/tauri.conf.json").bundle.macOS.bundleVersion)')"
-          expected_tag="v${package_version}-build.${bundle_version}"
           test "$package_version" = "$tauri_version"
-          test "$GITHUB_REF_NAME" = "$expected_tag"
+          base_tag="v${package_version}"
+          case "$GITHUB_REF_NAME" in
+            "$base_tag") ;;
+            "$base_tag"-*)
+              release_number="${GITHUB_REF_NAME#"$base_tag"-}"
+              [[ "$release_number" =~ ^[1-9][0-9]*$ ]]
+              (( release_number >= 2 ))
+              ;;
+            *)
+              echo "Expected $base_tag or a same-day release tag such as $base_tag-2; got $GITHUB_REF_NAME" >&2
+              exit 1
+              ;;
+          esac
       - run: bun run check
       - run: bun run test
       - run: cargo test --manifest-path src-tauri/Cargo.toml

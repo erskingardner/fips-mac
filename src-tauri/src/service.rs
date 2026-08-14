@@ -1,6 +1,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::{io::ErrorKind, path::PathBuf, sync::atomic::Ordering, time::Duration};
+use std::{
+    io::ErrorKind,
+    path::{Path, PathBuf},
+    sync::atomic::Ordering,
+    time::Duration,
+};
 use tauri::State;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -284,19 +289,73 @@ fn registration_status() -> String {
     #[cfg(target_os = "macos")]
     {
         use smappservice_rs::{AppService, ServiceStatus as RegistrationStatus, ServiceType};
+
+        match bundled_service_readiness() {
+            BundleReadiness::Incomplete => return "bundle_incomplete".into(),
+            BundleReadiness::OutsideApplications => return "app_not_installed".into(),
+            BundleReadiness::Ready => {}
+        }
         let controller = AppService::new(ServiceType::Daemon {
             plist_name: CONTROLLER_PLIST,
         });
         match controller.status() {
             RegistrationStatus::Enabled => "enabled".into(),
             RegistrationStatus::RequiresApproval => "requires_approval".into(),
-            RegistrationStatus::NotFound => "bundle_incomplete".into(),
-            _ => "not_registered".into(),
+            RegistrationStatus::NotRegistered => "not_registered".into(),
+            // macOS can report NotFound before this bundled daemon has ever
+            // been registered. Bundle readiness above is the reliable check
+            // for missing resources; registration will return the actionable
+            // error if ServiceManagement still cannot load the helper.
+            RegistrationStatus::NotFound => "not_registered".into(),
         }
     }
     #[cfg(not(target_os = "macos"))]
     {
         "unsupported".into()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BundleReadiness {
+    Ready,
+    OutsideApplications,
+    Incomplete,
+}
+
+#[cfg(target_os = "macos")]
+fn bundled_service_readiness() -> BundleReadiness {
+    std::env::current_exe()
+        .ok()
+        .map_or(BundleReadiness::Incomplete, |executable| {
+            bundle_readiness_for_executable(&executable, installer_package_name())
+        })
+}
+
+fn bundle_readiness_for_executable(executable: &Path, package_name: &str) -> BundleReadiness {
+    let Some(contents) = executable
+        .parent()
+        .filter(|directory| directory.file_name().is_some_and(|name| name == "MacOS"))
+        .and_then(Path::parent)
+        .filter(|directory| directory.file_name().is_some_and(|name| name == "Contents"))
+    else {
+        return BundleReadiness::Incomplete;
+    };
+    let controller = contents
+        .join("Library")
+        .join("LaunchDaemons")
+        .join(CONTROLLER_PLIST);
+    let installer = contents.join("Resources").join(package_name);
+    if !controller.is_file() || !installer.is_file() {
+        return BundleReadiness::Incomplete;
+    }
+    let installed = contents
+        .parent()
+        .and_then(Path::parent)
+        .is_some_and(|directory| directory == Path::new("/Applications"));
+    if installed {
+        BundleReadiness::Ready
+    } else {
+        BundleReadiness::OutsideApplications
     }
 }
 
@@ -743,6 +802,7 @@ pub async fn reset_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use tempfile::tempdir;
     use tokio::{io::AsyncWriteExt, net::UnixListener};
 
@@ -756,6 +816,33 @@ mod tests {
     #[test]
     fn selects_the_native_standard_installer() {
         assert_eq!(installer_package_name(), "fips-macos-x86_64.pkg");
+    }
+
+    #[test]
+    fn distinguishes_incomplete_and_uninstalled_app_bundles() {
+        let directory = tempdir().unwrap();
+        let contents = directory.path().join("FIPS.app/Contents");
+        let executable = contents.join("MacOS/fips-mac");
+        let controller = contents
+            .join("Library/LaunchDaemons")
+            .join(CONTROLLER_PLIST);
+        let installer = contents.join("Resources/fips-macos-arm64.pkg");
+
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(&executable, "app").unwrap();
+        assert_eq!(
+            bundle_readiness_for_executable(&executable, "fips-macos-arm64.pkg"),
+            BundleReadiness::Incomplete
+        );
+
+        fs::create_dir_all(controller.parent().unwrap()).unwrap();
+        fs::create_dir_all(installer.parent().unwrap()).unwrap();
+        fs::write(controller, "plist").unwrap();
+        fs::write(installer, "package").unwrap();
+        assert_eq!(
+            bundle_readiness_for_executable(&executable, "fips-macos-arm64.pkg"),
+            BundleReadiness::OutsideApplications
+        );
     }
 
     #[tokio::test]
