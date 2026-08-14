@@ -1,7 +1,7 @@
 # Mac App Store and TestFlight
 
 FIPS Mac is shown to users as **FIPS**. Apple Developer team `8Z6Q2LZ77W`,
-bundle identifier `com.paper-robin.fips-mac`, version `2026.8.13`, build `3`,
+bundle identifier `com.paper-robin.fips-mac`, version `2026.8.14`, build `4`,
 and the macOS 13 minimum remain current.
 
 This remains a **monitor-only** distribution track. It does not contain or
@@ -100,7 +100,7 @@ profile, and installer signature.
 The resulting package is written to:
 
 ```text
-src-tauri/target/universal-apple-darwin/release/bundle/macos/FIPS-2026.8.13-3.pkg
+src-tauri/target/universal-apple-darwin/release/bundle/macos/FIPS-2026.8.14-4.pkg
 ```
 
 ## Upload
@@ -110,5 +110,5 @@ for App Store Connect processing to finish, complete the export-compliance and
 App Sandbox exception questions, and then add the build to an internal
 TestFlight group.
 
-Build numbers are immutable after upload. Keep build `1` until it is uploaded;
-use build `2` for the next uploaded binary.
+Build numbers are immutable after upload. Increment the build number for every
+new binary uploaded to App Store Connect.

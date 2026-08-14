@@ -76,13 +76,12 @@ pub struct ConfigManager {
 }
 
 impl ConfigManager {
-    pub fn new(config_path: PathBuf) -> Self {
-        let parent = config_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    pub fn new(config_path: PathBuf, state_dir: PathBuf) -> Self {
         Self {
             config_path,
-            original_path: parent.join("fips.original.yaml"),
-            last_good_path: parent.join("fips.last-good.yaml"),
-            journal_path: parent.join("fips-config-state.json"),
+            original_path: state_dir.join("fips.original.yaml"),
+            last_good_path: state_dir.join("fips.last-good.yaml"),
+            journal_path: state_dir.join("fips-config-state.json"),
         }
     }
 
@@ -154,7 +153,7 @@ impl ConfigManager {
             || config.node.control.socket_path != "/var/run/fips/control.sock"
         {
             return Err(
-                "node.control.enabled must remain true and node.control.socket_path must remain /var/run/fips/control.sock for an app-managed node"
+                "node.control.enabled must remain true and node.control.socket_path must remain /var/run/fips/control.sock when this app manages the node"
                     .to_string(),
             );
         }
@@ -729,7 +728,8 @@ mod tests {
         let path = directory.path().join("fips.yaml");
         fs::write(&path, CONFIG).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
-        let manager = ConfigManager::new(path);
+        let manager = ConfigManager::new(path, directory.path().join("state"));
+        fs::create_dir(directory.path().join("state")).unwrap();
         manager.bootstrap(None).unwrap();
         (directory, manager)
     }
@@ -824,7 +824,7 @@ mod tests {
         );
         let unsafe_path = directory.path().join("unsafe.yaml");
         std::os::unix::fs::symlink(&manager.config_path, &unsafe_path).unwrap();
-        let unsafe_manager = ConfigManager::new(unsafe_path);
+        let unsafe_manager = ConfigManager::new(unsafe_path, directory.path().join("state-unsafe"));
         assert!(unsafe_manager.snapshot().is_err());
     }
 }

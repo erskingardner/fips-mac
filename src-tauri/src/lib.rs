@@ -1,8 +1,10 @@
 mod control;
 mod preferences;
+mod preview;
 mod service;
 
 use control::{ClientError, ControlClient, resolve_socket_path};
+use preview::{PreviewController, PreviewStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use service::{ServiceStatus, resolve_service_socket_path};
@@ -25,9 +27,12 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use tokio::sync::Notify;
 
 const TRAY_ID: &str = "fips";
+pub(crate) const DEVELOPMENT_TOOLS_INCLUDED: bool =
+    cfg!(debug_assertions) && option_env!("FIPS_MAC_PACKAGED_BUILD").is_none();
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MonitorSnapshot {
+    pub preview: bool,
     pub health: String,
     pub detail: String,
     pub socket_path: String,
@@ -41,6 +46,7 @@ pub struct MonitorSnapshot {
 impl MonitorSnapshot {
     fn starting(socket_path: &std::path::Path) -> Self {
         Self {
+            preview: false,
             health: "stopped".into(),
             detail: "Looking for the FIPS daemon…".into(),
             socket_path: socket_path.display().to_string(),
@@ -59,6 +65,7 @@ pub struct AppState {
     pub last_snapshot: Mutex<MonitorSnapshot>,
     pub refresh: Notify,
     pub service_action_busy: AtomicBool,
+    pub preview: PreviewController,
     onboarding_opened: AtomicBool,
 }
 
@@ -70,7 +77,7 @@ struct TrayMenuState {
     launch_item: CheckMenuItem<tauri::Wry>,
 }
 
-fn now_ms() -> u128 {
+pub(crate) fn now_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -130,13 +137,14 @@ fn snapshot_for_error(
             "FIPS is turned off. Use the service switch to start it.".into(),
         "stopped" => "FIPS is not running or its control socket is not installed.".into(),
         "permission_denied" => {
-            "Access was denied. Repair an app-managed node, or confirm this account belongs to the fips group for a package-managed node."
+            "Access was denied. Enable or repair app management, or confirm this account belongs to the fips group for the standard FIPS installation."
                 .into()
         }
         "incompatible" => format!("The daemon response is incompatible: {}", error.message),
         _ => error.message,
     };
     MonitorSnapshot {
+        preview: false,
         health: health.into(),
         detail,
         socket_path: path.display().to_string(),
@@ -159,6 +167,7 @@ async fn collect_snapshot(path: PathBuf, service_path: PathBuf) -> MonitorSnapsh
                     .controller_version
                     .is_some_and(|version| version >= 3);
             MonitorSnapshot {
+                preview: false,
                 health: health.into(),
                 detail,
                 socket_path: client.socket_path().display().to_string(),
@@ -185,7 +194,11 @@ async fn monitor(app: AppHandle) {
     loop {
         let path = app.state::<AppState>().socket_path.lock().unwrap().clone();
         let service_path = app.state::<AppState>().service_socket_path.clone();
-        let snapshot = collect_snapshot(path, service_path).await;
+        let preview_snapshot = app.state::<AppState>().preview.snapshot();
+        let snapshot = match preview_snapshot {
+            Some(snapshot) => snapshot,
+            None => collect_snapshot(path, service_path).await,
+        };
         *app.state::<AppState>().last_snapshot.lock().unwrap() = snapshot.clone();
         update_tray(&app, &snapshot);
         let _ = app.emit("monitor://snapshot", &snapshot);
@@ -215,6 +228,8 @@ fn should_open_onboarding(snapshot: &MonitorSnapshot) -> bool {
     snapshot.health == "permission_denied"
         || snapshot.service.ownership == "conflict"
         || snapshot.service.registration == "requires_approval"
+        || (snapshot.service.ownership == "external"
+            && snapshot.service.registration != "bundle_incomplete")
         || (snapshot.health == "stopped"
             && !(snapshot.service.available
                 && !snapshot.service.enabled
@@ -224,23 +239,32 @@ fn should_open_onboarding(snapshot: &MonitorSnapshot) -> bool {
 fn update_tray(app: &AppHandle, snapshot: &MonitorSnapshot) {
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
         let _ = tray.set_icon_with_as_template(Some(icon_for_health(&snapshot.health)), true);
-        let tooltip = format!("FIPS — {}", health_label(&snapshot.health));
+        let tooltip = if snapshot.preview {
+            format!(
+                "FIPS — {} — Product Preview",
+                health_label(&snapshot.health)
+            )
+        } else {
+            format!("FIPS — {}", health_label(&snapshot.health))
+        };
         let _ = tray.set_tooltip(Some(tooltip));
     }
     if let Some(menu) = app.try_state::<TrayMenuState>() {
-        let _ = menu
-            .status_item
-            .set_text(format!("Node: {}", health_label(&snapshot.health)));
+        let status = if snapshot.preview {
+            format!("Node: {} · Product Preview", health_label(&snapshot.health))
+        } else {
+            format!("Node: {}", health_label(&snapshot.health))
+        };
+        let _ = menu.status_item.set_text(status);
         let peers = snapshot
             .status
             .as_ref()
             .and_then(|status| status.get("peer_count"))
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        let _ = menu.peer_item.set_text(format!(
-            "{peers} authenticated peer{}",
-            if peers == 1 { "" } else { "s" }
-        ));
+        let _ = menu
+            .peer_item
+            .set_text(format!("{peers} peer{}", if peers == 1 { "" } else { "s" }));
         if snapshot.service.available {
             let _ = menu.service_toggle_item.set_enabled(true);
             let _ = menu
@@ -256,7 +280,7 @@ fn update_tray(app: &AppHandle, snapshot: &MonitorSnapshot) {
         } else {
             let _ = menu
                 .service_toggle_item
-                .set_text("FIPS service controls unavailable");
+                .set_text("FIPS lifecycle controls unavailable");
             let _ = menu.service_toggle_item.set_enabled(false);
             let _ = menu.service_restart_item.set_enabled(false);
         }
@@ -417,11 +441,11 @@ fn circle(put: &mut impl FnMut(i32, i32), cx: i32, cy: i32, radius: i32) {
 
 fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     let status_item = MenuItem::with_id(app, "status", "Node: Checking…", false, None::<&str>)?;
-    let peer_item = MenuItem::with_id(app, "peers", "0 authenticated peers", false, None::<&str>)?;
+    let peer_item = MenuItem::with_id(app, "peers", "0 peers", false, None::<&str>)?;
     let service_toggle_item = MenuItem::with_id(
         app,
         "service_toggle",
-        "FIPS service controls unavailable",
+        "FIPS lifecycle controls unavailable",
         false,
         None::<&str>,
     )?;
@@ -536,8 +560,13 @@ fn configure_window(window: WebviewWindow) {
 }
 
 #[tauri::command]
-fn copy_node_npub(app: AppHandle) -> Result<(), String> {
-    let npub = {
+fn copy_node_status_value(
+    app: &AppHandle,
+    field: &str,
+    missing_message: &str,
+    copy_error_label: &str,
+) -> Result<(), String> {
+    let value = {
         let state = app.state::<AppState>();
         let snapshot = state
             .last_snapshot
@@ -546,23 +575,107 @@ fn copy_node_npub(app: AppHandle) -> Result<(), String> {
         snapshot
             .status
             .as_ref()
-            .and_then(|status| status.get("npub"))
+            .and_then(|status| status.get(field))
             .and_then(Value::as_str)
-            .filter(|npub| !npub.is_empty())
-            .ok_or_else(|| "The FIPS node has not reported an npub yet.".to_string())?
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| missing_message.to_string())?
             .to_string()
     };
 
     app.clipboard()
-        .write_text(npub)
-        .map_err(|error| format!("Could not copy the node npub: {error}"))
+        .write_text(value)
+        .map_err(|error| format!("Could not copy the {copy_error_label}: {error}"))
+}
+
+#[tauri::command]
+fn copy_node_npub(app: AppHandle) -> Result<(), String> {
+    copy_node_status_value(
+        &app,
+        "npub",
+        "The FIPS node has not reported an npub yet.",
+        "node npub",
+    )
+}
+
+#[tauri::command]
+fn copy_node_address(app: AppHandle) -> Result<(), String> {
+    copy_node_status_value(
+        &app,
+        "ipv6_addr",
+        "The FIPS node has not reported a mesh address yet.",
+        "mesh address",
+    )
+}
+
+fn validate_peer_npub(npub: String) -> Result<String, String> {
+    let npub = npub.trim();
+    if npub.is_empty() || npub.len() > 128 || !npub.starts_with("npub1") || !npub.is_ascii() {
+        return Err("This peer has not reported a valid npub.".into());
+    }
+    Ok(npub.to_string())
+}
+
+#[tauri::command]
+fn copy_peer_npub(app: AppHandle, npub: String) -> Result<(), String> {
+    app.clipboard()
+        .write_text(validate_peer_npub(npub)?)
+        .map_err(|error| format!("Could not copy the peer npub: {error}"))
+}
+
+fn validate_peer_address(address: String) -> Result<String, String> {
+    let address = address.trim();
+    if address.is_empty()
+        || address.len() > 512
+        || !address.is_ascii()
+        || address.chars().any(char::is_control)
+    {
+        return Err("This peer has not reported a valid address.".into());
+    }
+    Ok(address.to_string())
+}
+
+#[tauri::command]
+fn copy_peer_address(app: AppHandle, address: String) -> Result<(), String> {
+    app.clipboard()
+        .write_text(validate_peer_address(address)?)
+        .map_err(|error| format!("Could not copy the peer address: {error}"))
+}
+
+#[tauri::command]
+fn get_product_preview(state: tauri::State<'_, AppState>) -> PreviewStatus {
+    state.preview.status()
+}
+
+#[tauri::command]
+fn set_product_preview(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    enabled: bool,
+    scenario: String,
+) -> Result<PreviewStatus, String> {
+    let status = state.preview.set(enabled, &scenario)?;
+    let snapshot = state.preview.snapshot().unwrap_or_else(|| {
+        let path = state.socket_path.lock().unwrap().clone();
+        let mut snapshot = MonitorSnapshot::starting(&path);
+        snapshot.detail = "Product Preview is off. Refreshing the live local node…".into();
+        snapshot
+    });
+    *state.last_snapshot.lock().unwrap() = snapshot.clone();
+    update_tray(&app, &snapshot);
+    let _ = app.emit("monitor://snapshot", &snapshot);
+    state.onboarding_opened.store(false, Ordering::Relaxed);
+    state.refresh.notify_one();
+    Ok(status)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let socket_path = resolve_socket_path(None);
     let service_socket_path = resolve_service_socket_path();
-    let initial_snapshot = MonitorSnapshot::starting(&socket_path);
+    let preview = PreviewController::new();
+    let initial_snapshot = preview
+        .snapshot()
+        .unwrap_or_else(|| MonitorSnapshot::starting(&socket_path));
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_autostart::init(
@@ -575,12 +688,14 @@ pub fn run() {
             last_snapshot: Mutex::new(initial_snapshot),
             refresh: Notify::new(),
             service_action_busy: AtomicBool::new(false),
+            preview,
             onboarding_opened: AtomicBool::new(false),
         })
         .invoke_handler(tauri::generate_handler![
             control::get_snapshot,
             control::get_peers,
             control::get_transports,
+            control::get_mmp,
             control::connect_peer,
             control::disconnect_peer,
             service::get_config,
@@ -601,6 +716,11 @@ pub fn run() {
             preferences::get_app_preferences,
             preferences::set_app_preferences,
             copy_node_npub,
+            copy_node_address,
+            copy_peer_npub,
+            copy_peer_address,
+            get_product_preview,
+            set_product_preview,
         ])
         .setup(|app| {
             let preferences = preferences::load(app.handle());
@@ -679,5 +799,36 @@ mod tests {
         let mut healthy = stopped;
         healthy.health = "healthy".into();
         assert!(!should_open_onboarding(&healthy));
+
+        healthy.service.ownership = "external".into();
+        healthy.service.registration = "not_registered".into();
+        assert!(should_open_onboarding(&healthy));
+
+        healthy.service.registration = "bundle_incomplete".into();
+        assert!(!should_open_onboarding(&healthy));
+    }
+
+    #[test]
+    fn validates_peer_npubs_before_copying() {
+        let npub = "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqpqqm9";
+        assert_eq!(validate_peer_npub(format!("  {npub}  ")).unwrap(), npub);
+        assert!(validate_peer_npub("".into()).is_err());
+        assert!(validate_peer_npub("nsec1secret".into()).is_err());
+        assert!(validate_peer_npub(format!("npub1{}", "q".repeat(128))).is_err());
+    }
+
+    #[test]
+    fn validates_peer_addresses_before_copying() {
+        assert_eq!(
+            validate_peer_address("  [fdc5::1234]:4040  ".into()).unwrap(),
+            "[fdc5::1234]:4040"
+        );
+        assert_eq!(
+            validate_peer_address("192.0.2.10:4040".into()).unwrap(),
+            "192.0.2.10:4040"
+        );
+        assert!(validate_peer_address("".into()).is_err());
+        assert!(validate_peer_address("host\nother".into()).is_err());
+        assert!(validate_peer_address("x".repeat(513)).is_err());
     }
 }

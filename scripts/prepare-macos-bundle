@@ -4,7 +4,7 @@ set -euo pipefail
 
 project_root=${0:A:h:h}
 if (( ! $+commands[rustup] )); then
-  print -u2 "rustup is required to build the bundled FIPS node."
+  print -u2 "rustup is required to build the standard FIPS installer packages."
   exit 1
 fi
 rustup_bin=${commands[rustup]:A:h}
@@ -14,8 +14,10 @@ fips_checkout=${FIPS_CHECKOUT_PATH:-"$project_root/../fips"}
 expected_revision=$(<"$project_root/fips-source-revision")
 requested_target=${TAURI_ENV_TARGET_TRIPLE:-$(rustc --print host-tuple)}
 binary_dir="$project_root/src-tauri/binaries"
+installer_dir="$project_root/src-tauri/resources/installers"
 service_manifest="$project_root/src-tauri/service/Cargo.toml"
 service_target_dir="$project_root/src-tauri/target/service"
+fips_target_dir=${FIPS_BUILD_TARGET_DIR:-"$fips_checkout/target"}
 
 if [[ ! -f "$fips_checkout/Cargo.toml" ]]; then
   print -u2 "FIPS checkout not found at $fips_checkout"
@@ -49,7 +51,7 @@ case "$requested_target" in
     ;;
 esac
 
-mkdir -p "$binary_dir"
+mkdir -p "$binary_dir" "$installer_dir"
 
 for target in $targets; do
   if ! rustup target list --toolchain "$RUSTUP_TOOLCHAIN" --installed | grep -Fxq "$target"; then
@@ -57,9 +59,42 @@ for target in $targets; do
     exit 1
   fi
 
-  print "Building unchanged FIPS node for $target"
-  cargo build --manifest-path "$fips_checkout/Cargo.toml" --release --locked --bin fips --target "$target"
-  cp "$fips_checkout/target/$target/release/fips" "$binary_dir/fips-$target"
+  print "Building standard FIPS package payload for $target"
+  cargo build \
+    --manifest-path "$fips_checkout/Cargo.toml" \
+    --target-dir "$fips_target_dir" \
+    --release \
+    --locked \
+    --bin fips \
+    --bin fipsctl \
+    --bin fipstop \
+    --target "$target"
+
+  package_binary_dir="$fips_checkout/target/$target/release"
+  mkdir -p "$package_binary_dir"
+  for executable in fips fipsctl fipstop; do
+    cp "$fips_target_dir/$target/release/$executable" "$package_binary_dir/$executable"
+  done
+  fips_version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$fips_checkout/Cargo.toml" | head -1)
+  "$fips_checkout/packaging/macos/build-pkg.sh" \
+    --no-build \
+    --target "$target" \
+    --version "$fips_version"
+  case "$target" in
+    aarch64-apple-darwin) package_arch=arm64 ;;
+    x86_64-apple-darwin) package_arch=x86_64 ;;
+  esac
+  package_source="$fips_checkout/deploy/fips-$fips_version-macos-$package_arch.pkg"
+  package_destination="$installer_dir/fips-macos-$package_arch.pkg"
+  if [[ -n ${APPLE_INSTALLER_SIGNING_IDENTITY:-} ]]; then
+    productsign \
+      --sign "$APPLE_INSTALLER_SIGNING_IDENTITY" \
+      "$package_source" \
+      "$package_destination"
+  else
+    cp "$package_source" "$package_destination"
+    print -u2 "Warning: packaged an unsigned FIPS installer for local testing."
+  fi
 
   print "Building FIPS Mac service for $target"
   cargo build \
@@ -72,19 +107,24 @@ for target in $targets; do
   cp "$service_target_dir/$target/release/fips-mac-service" "$binary_dir/fips-mac-service-$target"
 done
 
+# Tauri validates every configured resource before producing a native-slice
+# development app. The opposite-architecture package is never selected by that
+# binary, but a same-package placeholder keeps the bundle layout stable. A
+# universal release always contains both real architecture-specific packages.
+if [[ "$requested_target" == "aarch64-apple-darwin" ]]; then
+  cp "$installer_dir/fips-macos-arm64.pkg" "$installer_dir/fips-macos-x86_64.pkg"
+elif [[ "$requested_target" == "x86_64-apple-darwin" ]]; then
+  cp "$installer_dir/fips-macos-x86_64.pkg" "$installer_dir/fips-macos-arm64.pkg"
+fi
+
 if [[ "$requested_target" == "universal-apple-darwin" ]]; then
-  lipo -create \
-    "$binary_dir/fips-aarch64-apple-darwin" \
-    "$binary_dir/fips-x86_64-apple-darwin" \
-    -output "$binary_dir/fips-universal-apple-darwin"
   lipo -create \
     "$binary_dir/fips-mac-service-aarch64-apple-darwin" \
     "$binary_dir/fips-mac-service-x86_64-apple-darwin" \
     -output "$binary_dir/fips-mac-service-universal-apple-darwin"
 fi
 
-chmod 0755 "$binary_dir/fips-$requested_target" "$binary_dir/fips-mac-service-$requested_target"
+chmod 0755 "$binary_dir/fips-mac-service-$requested_target"
 
-print "Prepared bundled executables for $requested_target"
-lipo -archs "$binary_dir/fips-$requested_target"
+print "Prepared standard FIPS installer package(s) and management helper for $requested_target"
 lipo -archs "$binary_dir/fips-mac-service-$requested_target"

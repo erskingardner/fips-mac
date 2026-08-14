@@ -980,7 +980,7 @@ checksum = "9844ddc3a6e533d62bba727eb6c28b5d360921d5175e9ff0f1e621a5c590a4d5"
 [[package]]
 name = "fips"
 version = "0.5.0-dev"
-source = "git+https://github.com/erskingardner/fips?rev=ba161eadb79a782c08278b0af2d2b641b445518a#ba161eadb79a782c08278b0af2d2b641b445518a"
+source = "git+https://github.com/jmcorgan/fips?rev=dc3bace9d183eba6a0d199aa2a7a7349ccd2124c#dc3bace9d183eba6a0d199aa2a7a7349ccd2124c"
 dependencies = [
  "arc-swap",
  "bech32",
@@ -1022,7 +1022,7 @@ dependencies = [
 
 [[package]]
 name = "fips-mac-service"
-version = "2026.8.13"
+version = "2026.8.14"
 dependencies = [
  "fips",
  "hex",

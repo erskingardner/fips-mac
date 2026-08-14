@@ -1,9 +1,9 @@
 //! Privileged lifecycle controller bundled with FIPS for Mac.
 //!
 //! It accepts a small, fixed NDJSON protocol over a local Unix socket and
-//! manages only the two known launchd jobs plus the app-owned configuration.
-//! It links the exact pinned FIPS crate solely to validate configuration with
-//! the same types as the bundled node.
+//! manages only the standard FIPS launchd job and configuration. It links the
+//! exact pinned FIPS crate solely to validate configuration with the same types
+//! as the installed node.
 
 #[cfg(target_os = "macos")]
 mod config_manager;
@@ -39,22 +39,15 @@ mod macos {
 
     const SOCKET_PATH: &str = "/var/run/fips-mac/service.sock";
     const SOCKET_DIR: &str = "/var/run/fips-mac";
-    const CONTROL_DIR: &str = "/var/run/fips";
     const CONTROL_SOCKET: &str = "/var/run/fips/control.sock";
     const ADMIN_GROUP: &str = "admin";
 
-    const APP_LABEL: &str = "com.paper-robin.fips-mac.node";
-    const APP_TARGET: &str = "system/com.paper-robin.fips-mac.node";
-    const LEGACY_LABEL: &str = "com.fips.daemon";
-    const LEGACY_TARGET: &str = "system/com.fips.daemon";
-    const LEGACY_PLIST: &str = "/Library/LaunchDaemons/com.fips.daemon.plist";
+    const FIPS_LABEL: &str = "com.fips.daemon";
+    const FIPS_TARGET: &str = "system/com.fips.daemon";
+    const FIPS_PLIST: &str = "/Library/LaunchDaemons/com.fips.daemon.plist";
+    const FIPS_CONFIG: &str = "/usr/local/etc/fips/fips.yaml";
 
-    const APP_CONFIG_DIR: &str = "/Library/Application Support/FIPS";
-    const APP_CONFIG: &str = "/Library/Application Support/FIPS/fips.yaml";
-    const APP_LEGACY_MANAGED_CONFIG: &str = "/Library/Application Support/FIPS/fips-monitor.yaml";
-    const APP_STATE_DIR: &str = "/Library/Application Support/FIPS";
-    const APP_STATE_PATH: &str = "/Library/Application Support/FIPS/service-state.json";
-    const APP_LOG_DIR: &str = "/Library/Logs/FIPS";
+    const APP_STATE_DIR: &str = "/Library/Application Support/FIPS/standard-management";
     const RESOLVER_DIR: &str = "/etc/resolver";
     const RESOLVER_PATH: &str = "/etc/resolver/fips";
 
@@ -137,28 +130,6 @@ mod macos {
         detail: Option<String>,
     }
 
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    #[serde(default, deny_unknown_fields)]
-    struct ControllerState {
-        ownership: String,
-        enabled: bool,
-        migrated_from_legacy: bool,
-        legacy_was_enabled: bool,
-        legacy_resolver_adopted: bool,
-    }
-
-    impl Default for ControllerState {
-        fn default() -> Self {
-            Self {
-                ownership: "none".into(),
-                enabled: false,
-                migrated_from_legacy: false,
-                legacy_was_enabled: true,
-                legacy_resolver_adopted: false,
-            }
-        }
-    }
-
     #[derive(Debug, Clone)]
     struct LaunchStatus {
         enabled: bool,
@@ -199,8 +170,6 @@ mod macos {
 
         let listener = bind_socket(Path::new(SOCKET_PATH))?;
         let operation_lock = Arc::new(Mutex::new(()));
-        tokio::spawn(maintain_control_socket_permissions());
-
         loop {
             let (stream, _) = listener.accept().await?;
             let operation_lock = operation_lock.clone();
@@ -302,10 +271,11 @@ mod macos {
 
         let _guard = operation_lock.lock().await;
         let result = match request.command.as_str() {
-            "prepare_install" => prepare_install().await,
-            "migrate" => migrate().await,
-            "finish_migration" => finish_migration().await,
-            "rollback_migration" => rollback_migration().await,
+            "prepare_install" => prepare_management().await,
+            "migrate" | "finish_migration" | "rollback_migration" => Err(
+                "FIPS now uses the standard installation directly; migration is not required."
+                    .into(),
+            ),
             "repair" => repair().await,
             "start" => start_service().await,
             "stop" => stop_service().await,
@@ -328,38 +298,26 @@ mod macos {
         }
     }
 
-    fn require_app_managed() -> Result<(), String> {
-        let state = read_state()?;
-        if state.ownership != "app_managed" {
+    fn require_managed_installation() -> Result<(), String> {
+        if !Path::new(FIPS_PLIST).exists() || !Path::new(FIPS_CONFIG).exists() {
             return Err(
-                "Configuration editing is available after FIPS is installed or migrated into this app. Package-managed nodes remain monitor-only."
+                "The standard FIPS installation was not found. Install FIPS, then try again."
                     .into(),
             );
         }
-        Ok(())
+        prepare_management_files()
     }
 
     async fn require_exclusive_app_ownership() -> Result<(), String> {
-        let state = read_state()?;
-        match ownership(&state).await? {
-            Ownership::AppManaged => Ok(()),
-            Ownership::Conflict => Err(
-                "Configuration cannot be changed while app-managed and package-managed FIPS services conflict. Repair the installation first."
-                    .into(),
-            ),
-            _ => Err(
-                "Configuration editing is available only for a node managed by this app."
-                    .into(),
-            ),
-        }
+        require_managed_installation()
     }
 
     fn config_manager() -> ConfigManager {
-        ConfigManager::new(PathBuf::from(APP_CONFIG))
+        ConfigManager::new(PathBuf::from(FIPS_CONFIG), PathBuf::from(APP_STATE_DIR))
     }
 
     fn config_snapshot() -> DispatchOutcome {
-        let result = require_app_managed().and_then(|()| config_manager().snapshot());
+        let result = require_managed_installation().and_then(|()| config_manager().snapshot());
         match result {
             Ok(snapshot) => DispatchOutcome::response(Response::ok(snapshot)),
             Err(error) => DispatchOutcome::error(error),
@@ -367,7 +325,7 @@ mod macos {
     }
 
     fn show_config_apply() -> DispatchOutcome {
-        let result = require_app_managed().map(|()| config_manager().last_apply());
+        let result = require_managed_installation().map(|()| config_manager().last_apply());
         match result {
             Ok(apply) => DispatchOutcome::response(Response::ok(apply)),
             Err(error) => DispatchOutcome::error(error),
@@ -381,7 +339,7 @@ mod macos {
 
     fn validate_config(request: &Request) -> DispatchOutcome {
         let result: Result<Value, String> = (|| {
-            require_app_managed()?;
+            require_managed_installation()?;
             let params: ConfigDraftParams = parse_params(request)?;
             let manager = config_manager();
             match manager.validate(&params.expected_revision, &params.yaml) {
@@ -457,7 +415,7 @@ mod macos {
     async fn activate_config(activation: ApplyActivation) {
         let manager = config_manager();
         if activation == ApplyActivation::None {
-            if let Err(error) = sync_dns_resolver(false) {
+            if let Err(error) = sync_dns_resolver() {
                 let _ = manager.mark_failed(manager.redact_error_message(&error));
             } else {
                 let _ = manager.mark_applied();
@@ -465,44 +423,23 @@ mod macos {
             return;
         }
 
-        let state = match read_state() {
-            Ok(state) => state,
-            Err(error) => {
-                let _ = manager.rollback_pending(manager.redact_error_message(&error));
-                return;
-            }
-        };
-        match ownership(&state).await {
-            Ok(Ownership::AppManaged) => {}
-            Ok(_) => {
-                let _ = manager.rollback_pending(
-                    "configuration activation was cancelled because this app no longer owns FIPS",
-                );
-                return;
-            }
-            Err(error) => {
-                let _ = manager.rollback_pending(manager.redact_error_message(&error));
-                return;
-            }
-        }
-
-        let launch = match launch_status(APP_LABEL, APP_TARGET).await {
+        let launch = match launch_status(FIPS_LABEL, FIPS_TARGET).await {
             Ok(status) => status,
             Err(error) => {
                 let _ = manager.rollback_pending(manager.redact_error_message(&error));
                 return;
             }
         };
-        if !state.enabled || !launch.running {
+        if !launch.running {
             // A semantic draft is persisted but cannot be called active until
             // the next successful node start proves the runtime configuration.
             return;
         }
 
         let activation_result = async {
-            restart_target(APP_LABEL, APP_TARGET, None).await?;
+            restart_target(FIPS_LABEL, FIPS_TARGET, Some(FIPS_PLIST)).await?;
             wait_for_control_ready().await?;
-            sync_dns_resolver(state.migrated_from_legacy)?;
+            sync_dns_resolver()?;
             Ok::<(), String>(())
         }
         .await;
@@ -514,9 +451,9 @@ mod macos {
                 let redacted = manager.redact_error_message(&error);
                 if manager.rollback_pending(redacted.clone()).unwrap_or(false) {
                     let restored = async {
-                        restart_target(APP_LABEL, APP_TARGET, None).await?;
+                        restart_target(FIPS_LABEL, FIPS_TARGET, Some(FIPS_PLIST)).await?;
                         wait_for_control_ready().await?;
-                        sync_dns_resolver(state.migrated_from_legacy)?;
+                        sync_dns_resolver()?;
                         Ok::<(), String>(())
                     }
                     .await;
@@ -556,7 +493,6 @@ mod macos {
             }
             .await;
             if ready.is_some() {
-                secure_control_paths();
                 return Ok(());
             }
             if tokio::time::Instant::now() >= deadline {
@@ -566,195 +502,61 @@ mod macos {
         }
     }
 
-    async fn prepare_install() -> Result<ServiceStatus, String> {
-        let legacy = launch_status(LEGACY_LABEL, LEGACY_TARGET).await?;
-        if legacy.loaded || Path::new(LEGACY_PLIST).exists() {
-            return Err(
-                "A package-managed FIPS installation already exists. Use it as-is or migrate it."
-                    .into(),
-            );
-        }
-        prepare_app_directories(None)?;
-        sync_dns_resolver(false)?;
-        write_state(&ControllerState {
-            ownership: "app_managed".into(),
-            enabled: true,
-            ..ControllerState::default()
-        })?;
+    async fn prepare_management() -> Result<ServiceStatus, String> {
+        require_managed_installation()?;
+        sync_dns_resolver()?;
         service_status().await
     }
 
-    async fn migrate() -> Result<ServiceStatus, String> {
-        let legacy = launch_status(LEGACY_LABEL, LEGACY_TARGET).await?;
-        if !legacy.loaded && !Path::new(LEGACY_PLIST).exists() {
-            return Err("No package-managed FIPS installation was found to migrate.".into());
-        }
-
-        let previous = read_state()?;
-        if previous.ownership == "app_managed" {
-            return Err("FIPS already owns this node.".into());
-        }
-
-        stop_target(LEGACY_LABEL, LEGACY_TARGET, Some(LEGACY_PLIST)).await?;
-        if let Err(error) = prepare_app_directories(Some(Path::new("/usr/local/etc/fips"))) {
-            if legacy.enabled {
-                let _ = start_target(LEGACY_LABEL, LEGACY_TARGET, Some(LEGACY_PLIST)).await;
-            }
-            return Err(format!(
-                "could not import the existing FIPS installation: {error}"
-            ));
-        }
-
-        let legacy_resolver_adopted = match sync_dns_resolver(true) {
-            Ok(adopted) => adopted,
-            Err(error) => {
-                if legacy.enabled {
-                    let _ = start_target(LEGACY_LABEL, LEGACY_TARGET, Some(LEGACY_PLIST)).await;
-                }
-                return Err(error);
-            }
-        };
-        let migrated_state = ControllerState {
-            ownership: "app_managed".into(),
-            enabled: true,
-            migrated_from_legacy: true,
-            legacy_was_enabled: legacy.enabled,
-            legacy_resolver_adopted,
-        };
-        if let Err(error) = write_state(&migrated_state) {
-            if legacy_resolver_adopted {
-                let _ = restore_legacy_dns_resolver();
-            }
-            if legacy.enabled {
-                let _ = start_target(LEGACY_LABEL, LEGACY_TARGET, Some(LEGACY_PLIST)).await;
-            }
-            return Err(error);
-        }
-        service_status().await
-    }
-
-    async fn finish_migration() -> Result<ServiceStatus, String> {
-        let state = read_state()?;
-        if state.ownership != "app_managed" {
-            return Err("No app-managed migration is pending.".into());
-        }
-        let app = launch_status(APP_LABEL, APP_TARGET).await?;
-        if !app.running {
-            return Err(
-                "The bundled FIPS node is not running; migration was not finalized.".into(),
-            );
-        }
-        service_status().await
-    }
-
-    async fn rollback_migration() -> Result<ServiceStatus, String> {
-        let state = read_state()?;
-        if state.ownership == "app_managed" {
-            let _ = stop_target(APP_LABEL, APP_TARGET, None).await;
-        }
-        if state.legacy_resolver_adopted {
-            restore_legacy_dns_resolver()?;
-        } else if !state.migrated_from_legacy {
-            remove_dns_resolver()?;
-        }
-        write_state(&ControllerState::default())?;
-        if state.migrated_from_legacy && state.legacy_was_enabled {
-            start_target(LEGACY_LABEL, LEGACY_TARGET, Some(LEGACY_PLIST)).await?;
-        }
-        service_status().await
+    fn prepare_management_files() -> Result<(), String> {
+        ensure_directory(Path::new(APP_STATE_DIR), 0o750).map_err(|e| e.to_string())?;
+        require_root_regular_file(Path::new(FIPS_CONFIG))?;
+        config_manager().bootstrap(None)
     }
 
     async fn repair() -> Result<ServiceStatus, String> {
-        ensure_directory(Path::new(SOCKET_DIR), 0o2770).map_err(|e| e.to_string())?;
-        let state = read_state()?;
-        let app = launch_status(APP_LABEL, APP_TARGET).await?;
-        let legacy = launch_status(LEGACY_LABEL, LEGACY_TARGET).await?;
-        if state.ownership == "app_managed" && legacy.running {
-            stop_target(LEGACY_LABEL, LEGACY_TARGET, Some(LEGACY_PLIST)).await?;
-        } else if state.ownership != "app_managed" && app.running {
-            stop_target(APP_LABEL, APP_TARGET, None).await?;
-        }
-        if state.ownership == "app_managed" {
-            prepare_app_directories(None)?;
-            sync_dns_resolver(state.migrated_from_legacy)?;
-        }
-        secure_control_paths();
-        service_status().await
+        prepare_management().await
     }
 
     async fn start_service() -> Result<ServiceStatus, String> {
-        match ownership(&read_state()?).await? {
-            Ownership::AppManaged => {
-                update_enabled(true)?;
-                activate_app_service(false).await?;
-            }
-            Ownership::External => {
-                start_target(LEGACY_LABEL, LEGACY_TARGET, Some(LEGACY_PLIST)).await?;
-            }
-            Ownership::Conflict => {
-                return Err("Both FIPS services are active; repair the installation first.".into());
-            }
-            Ownership::None => return Err("FIPS is not installed.".into()),
-        }
+        require_managed_installation()?;
+        activate_standard_service(false).await?;
         service_status().await
     }
 
     async fn stop_service() -> Result<ServiceStatus, String> {
-        match ownership(&read_state()?).await? {
-            Ownership::AppManaged => {
-                update_enabled(false)?;
-                stop_target(APP_LABEL, APP_TARGET, None).await?;
-            }
-            Ownership::External => {
-                stop_target(LEGACY_LABEL, LEGACY_TARGET, Some(LEGACY_PLIST)).await?;
-            }
-            Ownership::Conflict => {
-                return Err("Both FIPS services are active; repair the installation first.".into());
-            }
-            Ownership::None => return Err("FIPS is not installed.".into()),
-        }
+        require_managed_installation()?;
+        stop_target(FIPS_LABEL, FIPS_TARGET, Some(FIPS_PLIST)).await?;
         service_status().await
     }
 
     async fn restart_service() -> Result<ServiceStatus, String> {
-        match ownership(&read_state()?).await? {
-            Ownership::AppManaged => {
-                update_enabled(true)?;
-                activate_app_service(true).await?;
-            }
-            Ownership::External => {
-                restart_target(LEGACY_LABEL, LEGACY_TARGET, Some(LEGACY_PLIST)).await?;
-            }
-            Ownership::Conflict => {
-                return Err("Both FIPS services are active; repair the installation first.".into());
-            }
-            Ownership::None => return Err("FIPS is not installed.".into()),
-        }
+        require_managed_installation()?;
+        activate_standard_service(true).await?;
         service_status().await
     }
 
-    async fn activate_app_service(restart: bool) -> Result<(), String> {
+    async fn activate_standard_service(restart: bool) -> Result<(), String> {
         let manager = config_manager();
-        let state = read_state()?;
-        let result = async {
+        let activation = async {
             if restart {
-                restart_target(APP_LABEL, APP_TARGET, None).await?;
+                restart_target(FIPS_LABEL, FIPS_TARGET, Some(FIPS_PLIST)).await?;
             } else {
-                start_target(APP_LABEL, APP_TARGET, None).await?;
+                start_target(FIPS_LABEL, FIPS_TARGET, Some(FIPS_PLIST)).await?;
             }
             wait_for_control_ready().await?;
-            sync_dns_resolver(state.migrated_from_legacy)?;
+            sync_dns_resolver()?;
             Ok::<(), String>(())
         }
         .await;
-        match result {
+        match activation {
             Ok(()) => manager.mark_applied(),
             Err(error) => {
                 let redacted = manager.redact_error_message(&error);
                 if manager.rollback_pending(redacted.clone()).unwrap_or(false) {
-                    restart_target(APP_LABEL, APP_TARGET, None).await?;
+                    restart_target(FIPS_LABEL, FIPS_TARGET, Some(FIPS_PLIST)).await?;
                     wait_for_control_ready().await?;
-                    sync_dns_resolver(state.migrated_from_legacy)?;
+                    sync_dns_resolver()?;
                     return Err(format!(
                         "The new configuration could not start and was rolled back: {redacted}"
                     ));
@@ -765,128 +567,33 @@ mod macos {
     }
 
     async fn remove_keep_data() -> Result<ServiceStatus, String> {
-        let state = read_state()?;
-        if state.ownership == "app_managed" {
-            let _ = stop_target(APP_LABEL, APP_TARGET, None).await;
-        }
-        if state.legacy_resolver_adopted {
-            restore_legacy_dns_resolver()?;
-        } else if !state.migrated_from_legacy {
-            remove_dns_resolver()?;
-        }
-        write_state(&ControllerState::default())?;
-        if state.migrated_from_legacy && state.legacy_was_enabled {
-            start_target(LEGACY_LABEL, LEGACY_TARGET, Some(LEGACY_PLIST)).await?;
-        }
-        service_status().await
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum Ownership {
-        AppManaged,
-        External,
-        Conflict,
-        None,
-    }
-
-    async fn ownership(state: &ControllerState) -> Result<Ownership, String> {
-        let app = launch_status(APP_LABEL, APP_TARGET).await?;
-        let legacy = launch_status(LEGACY_LABEL, LEGACY_TARGET).await?;
-        Ok(classify_ownership(
-            state,
-            &app,
-            &legacy,
-            Path::new(LEGACY_PLIST).exists(),
-        ))
-    }
-
-    fn classify_ownership(
-        state: &ControllerState,
-        app: &LaunchStatus,
-        legacy: &LaunchStatus,
-        legacy_plist_exists: bool,
-    ) -> Ownership {
-        if app.running && legacy.running {
-            return Ownership::Conflict;
-        }
-        if state.ownership == "app_managed" {
-            if legacy.running {
-                return Ownership::Conflict;
-            }
-            return Ownership::AppManaged;
-        }
-        if legacy.loaded || legacy_plist_exists {
-            return Ownership::External;
-        }
-        if app.running {
-            return Ownership::Conflict;
-        }
-        Ownership::None
+        Err("Removing FIPS is handled by the standard FIPS uninstaller; this app will not remove an existing installation.".into())
     }
 
     async fn service_status() -> Result<ServiceStatus, String> {
-        let state = read_state()?;
-        let app = launch_status(APP_LABEL, APP_TARGET).await?;
-        let legacy = launch_status(LEGACY_LABEL, LEGACY_TARGET).await?;
-        let owner = classify_ownership(&state, &app, &legacy, Path::new(LEGACY_PLIST).exists());
-        let (status, ownership, installation, can_migrate, config_path, detail) = match owner {
-            Ownership::AppManaged => (
-                app,
-                "app_managed",
-                "app_managed",
-                false,
-                Some(APP_CONFIG),
-                None,
-            ),
-            Ownership::External => (
-                legacy,
-                "external",
-                "external",
-                true,
-                Some("/usr/local/etc/fips/fips.yaml"),
-                Some("Using the existing package-managed FIPS node.".into()),
-            ),
-            Ownership::Conflict => (
-                app.clone(),
-                "conflict",
-                "conflict",
-                false,
-                Some(APP_CONFIG),
-                Some(if app.running && legacy.running {
-                    "Both app-managed and package-managed FIPS nodes are active.".into()
-                } else if legacy.running {
-                    "The package-managed FIPS service is active while the FIPS Mac app owns this node."
-                        .into()
-                } else {
-                    "The bundled FIPS service is active without valid ownership state.".into()
-                }),
-            ),
-            Ownership::None => (
-                app,
-                "none",
-                "not_installed",
-                false,
-                None,
-                Some("FIPS is ready to be installed by the FIPS Mac app.".into()),
-            ),
-        };
+        let installed = Path::new(FIPS_PLIST).exists() && Path::new(FIPS_CONFIG).exists();
+        let status = launch_status(FIPS_LABEL, FIPS_TARGET).await?;
         Ok(ServiceStatus {
-            controller_version: 3,
+            controller_version: 4,
             state: if status.running { "running" } else { "stopped" },
-            enabled: if owner == Ownership::AppManaged {
-                state.enabled && status.enabled
-            } else {
-                status.enabled
-            },
+            enabled: status.enabled,
             loaded: status.loaded,
             running: status.running,
-            ownership,
-            installation,
-            can_migrate,
-            config_path,
+            ownership: if installed { "app_managed" } else { "none" },
+            installation: if installed {
+                "standard"
+            } else {
+                "not_installed"
+            },
+            can_migrate: false,
+            config_path: installed.then_some(FIPS_CONFIG),
             pid: status.pid,
             last_exit_status: status.last_exit_status,
-            detail,
+            detail: Some(if installed {
+                "Using the standard FIPS installation in /usr/local.".into()
+            } else {
+                "The standard FIPS installation was not found.".into()
+            }),
         })
     }
 
@@ -903,7 +610,7 @@ mod macos {
             require_root_regular_file(Path::new(plist))?;
             run_launchctl(&["bootstrap", "system", plist]).await?;
         } else {
-            return Err("The bundled FIPS service is not registered with macOS.".into());
+            return Err("The standard FIPS service is not registered with macOS.".into());
         }
         wait_for(label, target, |status| status.running, "start").await
     }
@@ -949,7 +656,6 @@ mod macos {
         loop {
             let status = launch_status(label, target).await?;
             if predicate(&status) {
-                secure_control_paths();
                 return Ok(status);
             }
             if tokio::time::Instant::now() >= deadline {
@@ -1037,145 +743,6 @@ mod macos {
         }
     }
 
-    fn prepare_app_directories(legacy_source: Option<&Path>) -> Result<(), String> {
-        ensure_directory(Path::new(APP_STATE_DIR), 0o750).map_err(|e| e.to_string())?;
-        ensure_directory(Path::new(APP_LOG_DIR), 0o750).map_err(|e| e.to_string())?;
-        ensure_directory(Path::new(CONTROL_DIR), 0o2770).map_err(|e| e.to_string())?;
-
-        let config_dir = Path::new(APP_CONFIG_DIR);
-        if !config_dir.exists() {
-            ensure_directory(config_dir, 0o750).map_err(|e| e.to_string())?;
-        } else {
-            require_real_directory(config_dir)?;
-            set_admin_permissions(config_dir, 0o750).map_err(|e| e.to_string())?;
-        }
-
-        if let Some(source) = legacy_source {
-            copy_configuration(source, config_dir)?;
-        }
-        if !Path::new(APP_CONFIG).exists() {
-            let default = bundled_contents_dir()?.join("Resources/fips.default.yaml");
-            copy_regular_file(&default, Path::new(APP_CONFIG), 0o600)?;
-        } else {
-            require_root_regular_file(Path::new(APP_CONFIG))?;
-            set_admin_permissions(Path::new(APP_CONFIG), 0o600).map_err(|e| e.to_string())?;
-        }
-        if Path::new(APP_LEGACY_MANAGED_CONFIG).exists() {
-            require_root_regular_file(Path::new(APP_LEGACY_MANAGED_CONFIG))?;
-            set_admin_permissions(Path::new(APP_LEGACY_MANAGED_CONFIG), 0o600)
-                .map_err(|e| e.to_string())?;
-        }
-        config_manager().bootstrap(Some(Path::new(APP_LEGACY_MANAGED_CONFIG)))?;
-        Ok(())
-    }
-
-    fn copy_configuration(source: &Path, destination: &Path) -> Result<(), String> {
-        require_real_directory(source)?;
-        for entry in fs::read_dir(source)
-            .map_err(|error| format!("could not read {}: {error}", source.display()))?
-        {
-            let entry = entry.map_err(|error| format!("could not read config entry: {error}"))?;
-            let metadata = entry.metadata().map_err(|error| {
-                format!("could not inspect {}: {error}", entry.path().display())
-            })?;
-            if !metadata.is_file() || entry.file_type().map(|t| t.is_symlink()).unwrap_or(true) {
-                continue;
-            }
-            let destination_path = destination.join(entry.file_name());
-            if destination_path.exists() {
-                continue;
-            }
-            let mode = if entry.file_name().to_string_lossy().ends_with(".pub") {
-                0o644
-            } else {
-                0o600
-            };
-            copy_regular_file(&entry.path(), &destination_path, mode)?;
-        }
-        Ok(())
-    }
-
-    fn bundled_contents_dir() -> Result<PathBuf, String> {
-        let executable = std::env::current_exe()
-            .map_err(|error| format!("could not locate bundled service: {error}"))?;
-        executable
-            .parent()
-            .and_then(Path::parent)
-            .map(Path::to_path_buf)
-            .ok_or_else(|| "bundled service is not inside a macOS app bundle".into())
-    }
-
-    fn copy_regular_file(source: &Path, destination: &Path, mode: u32) -> Result<(), String> {
-        let metadata = fs::symlink_metadata(source)
-            .map_err(|error| format!("could not inspect {}: {error}", source.display()))?;
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            return Err(format!("{} is not a regular file", source.display()));
-        }
-        let bytes = fs::read(source)
-            .map_err(|error| format!("could not read {}: {error}", source.display()))?;
-        atomic_write(destination, &bytes, mode)
-    }
-
-    fn read_state() -> Result<ControllerState, String> {
-        let path = Path::new(APP_STATE_PATH);
-        if !path.exists() {
-            return Ok(ControllerState::default());
-        }
-        require_root_regular_file(path)?;
-        let bytes =
-            fs::read(path).map_err(|error| format!("could not read service state: {error}"))?;
-        serde_json::from_slice(&bytes)
-            .map_err(|error| format!("could not parse service state: {error}"))
-    }
-
-    fn write_state(state: &ControllerState) -> Result<(), String> {
-        ensure_directory(Path::new(APP_STATE_DIR), 0o750).map_err(|e| e.to_string())?;
-        let bytes = serde_json::to_vec_pretty(state)
-            .map_err(|error| format!("could not encode service state: {error}"))?;
-        atomic_write(Path::new(APP_STATE_PATH), &bytes, 0o600)
-    }
-
-    fn update_enabled(enabled: bool) -> Result<(), String> {
-        let mut state = read_state()?;
-        state.enabled = enabled;
-        write_state(&state)
-    }
-
-    fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
-        let parent = path
-            .parent()
-            .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
-        require_real_directory(parent)?;
-        if let Ok(metadata) = fs::symlink_metadata(path)
-            && (metadata.file_type().is_symlink() || !metadata.is_file())
-        {
-            return Err(format!(
-                "refusing to replace unsafe path {}",
-                path.display()
-            ));
-        }
-        let suffix = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let temporary = parent.join(format!(".fips-mac-{}-{suffix}.tmp", std::process::id()));
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode)
-            .open(&temporary)
-            .map_err(|error| format!("could not create {}: {error}", temporary.display()))?;
-        file.write_all(bytes)
-            .and_then(|()| file.sync_all())
-            .map_err(|error| format!("could not persist {}: {error}", temporary.display()))?;
-        fs::rename(&temporary, path)
-            .map_err(|error| format!("could not install {}: {error}", path.display()))?;
-        File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| format!("could not sync {}: {error}", parent.display()))?;
-        set_admin_permissions(path, mode).map_err(|error| error.to_string())
-    }
-
     fn ensure_directory(path: &Path, mode: u32) -> io::Result<()> {
         match fs::symlink_metadata(path) {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
@@ -1234,40 +801,10 @@ mod macos {
         Ok(())
     }
 
-    async fn maintain_control_socket_permissions() {
-        let mut interval = tokio::time::interval(Duration::from_secs(2));
-        loop {
-            interval.tick().await;
-            secure_control_paths();
-            if let Ok(state) = read_state()
-                && state.ownership == "app_managed"
-            {
-                let _ = sync_dns_resolver(state.migrated_from_legacy);
-            }
-        }
-    }
-
-    fn secure_control_paths() {
-        let directory = Path::new(CONTROL_DIR);
-        if let Ok(metadata) = fs::symlink_metadata(directory)
-            && metadata.is_dir()
-            && !metadata.file_type().is_symlink()
-        {
-            let _ = set_admin_permissions(directory, 0o2770);
-        }
-        let socket = Path::new(CONTROL_SOCKET);
-        if let Ok(metadata) = fs::symlink_metadata(socket)
-            && metadata.file_type().is_socket()
-            && !metadata.file_type().is_symlink()
-        {
-            let _ = set_admin_permissions(socket, 0o770);
-        }
-    }
-
-    fn sync_dns_resolver(allow_legacy_resolver: bool) -> Result<bool, String> {
-        let config_path = Path::new(APP_CONFIG);
+    fn sync_dns_resolver() -> Result<(), String> {
+        let config_path = Path::new(FIPS_CONFIG);
         if !config_path.exists() {
-            return Ok(false);
+            return Ok(());
         }
         require_root_regular_file(config_path)?;
         let config: EffectiveConfig = serde_yaml::from_slice(
@@ -1277,7 +814,7 @@ mod macos {
         .map_err(|error| format!("could not parse DNS configuration: {error}"))?;
         if !config.dns.enabled {
             remove_dns_resolver()?;
-            return Ok(false);
+            return Ok(());
         }
         let bind: IpAddr = config
             .dns
@@ -1294,30 +831,28 @@ mod macos {
             config.dns.port
         );
         ensure_root_directory(Path::new(RESOLVER_DIR), 0o755)?;
-        install_dns_resolver(contents.as_bytes(), allow_legacy_resolver)
+        install_dns_resolver(contents.as_bytes())
     }
 
-    fn install_dns_resolver(bytes: &[u8], allow_legacy_resolver: bool) -> Result<bool, String> {
+    fn install_dns_resolver(bytes: &[u8]) -> Result<(), String> {
         let path = Path::new(RESOLVER_PATH);
-        let mut adopted_legacy = false;
         if let Ok(existing) = fs::read(path) {
             if existing == bytes {
-                return Ok(false);
+                return Ok(());
             }
             if !existing.starts_with(b"# Managed by FIPS\n") {
                 const LEGACY_RESOLVER: &[u8] = b"nameserver ::1\nport 5354\n";
-                if !allow_legacy_resolver || existing != LEGACY_RESOLVER {
+                if existing != LEGACY_RESOLVER {
                     return Err(format!(
                         "{} already exists and is not managed by FIPS",
                         path.display()
                     ));
                 }
-                adopted_legacy = true;
             }
         }
         atomic_write_root(path, bytes, 0o644)?;
         flush_dns_cache();
-        Ok(adopted_legacy)
+        Ok(())
     }
 
     fn remove_dns_resolver() -> Result<(), String> {
@@ -1343,20 +878,6 @@ mod macos {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(format!("could not inspect {}: {error}", path.display())),
         }
-    }
-
-    fn restore_legacy_dns_resolver() -> Result<(), String> {
-        const LEGACY_RESOLVER: &[u8] = b"nameserver ::1\nport 5354\n";
-        let path = Path::new(RESOLVER_PATH);
-        if let Ok(existing) = fs::read(path)
-            && !existing.starts_with(b"# Managed by FIPS\n")
-        {
-            return Ok(());
-        }
-        ensure_root_directory(Path::new(RESOLVER_DIR), 0o755)?;
-        atomic_write_root(path, LEGACY_RESOLVER, 0o644)?;
-        flush_dns_cache();
-        Ok(())
     }
 
     fn flush_dns_cache() {
@@ -1465,60 +986,6 @@ mod macos {
             let output = "disabled services = {\n\t\"com.example.node\" => disabled\n}";
             assert!(is_service_disabled(output, "com.example.node"));
             assert!(!is_service_disabled(output, "com.example"));
-        }
-
-        #[test]
-        fn controller_state_defaults_new_migration_fields() {
-            let state: ControllerState = serde_json::from_str(
-                r#"{"ownership":"app_managed","enabled":true,"migrated_from_legacy":true,"legacy_was_enabled":true}"#,
-            )
-            .unwrap();
-            assert!(!state.legacy_resolver_adopted);
-        }
-
-        #[test]
-        fn registered_but_disabled_node_does_not_claim_ownership() {
-            let registered = LaunchStatus {
-                enabled: false,
-                loaded: true,
-                running: false,
-                pid: None,
-                last_exit_status: None,
-            };
-            let absent = LaunchStatus {
-                enabled: false,
-                loaded: false,
-                running: false,
-                pid: None,
-                last_exit_status: None,
-            };
-            assert_eq!(
-                classify_ownership(&ControllerState::default(), &registered, &absent, false),
-                Ownership::None
-            );
-        }
-
-        #[test]
-        fn app_state_and_running_package_is_a_conflict() {
-            let stopped = LaunchStatus {
-                enabled: true,
-                loaded: true,
-                running: false,
-                pid: None,
-                last_exit_status: None,
-            };
-            let running = LaunchStatus {
-                running: true,
-                ..stopped.clone()
-            };
-            let state = ControllerState {
-                ownership: "app_managed".into(),
-                ..ControllerState::default()
-            };
-            assert_eq!(
-                classify_ownership(&state, &stopped, &running, true),
-                Ownership::Conflict
-            );
         }
     }
 }

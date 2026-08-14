@@ -1,0 +1,97 @@
+#!/bin/zsh
+
+set -euo pipefail
+
+project_root=${0:A:h:h}
+source_checkout=${FIPS_CHECKOUT_PATH:-"$project_root/../fips"}
+expected_revision=$(<"$project_root/fips-source-revision")
+target=$(rustc --print host-tuple)
+cached_checkout="$project_root/src-tauri/target/fips-local-source/${expected_revision[1,12]}"
+
+case "$target" in
+  aarch64-apple-darwin|x86_64-apple-darwin) ;;
+  *)
+    print -u2 "Fast local app builds are supported only on macOS (got $target)."
+    exit 1
+    ;;
+esac
+
+if [[ ! -f "$source_checkout/Cargo.toml" ]]; then
+  print -u2 "FIPS checkout not found at $source_checkout"
+  print -u2 "Set FIPS_CHECKOUT_PATH to an existing FIPS Git checkout."
+  exit 1
+fi
+
+build_checkout="$source_checkout"
+actual_revision=$(git -C "$source_checkout" rev-parse HEAD)
+tracked_changes=$(git -C "$source_checkout" status --porcelain --untracked-files=no)
+if [[ "$actual_revision" != "$expected_revision" || -n "$tracked_changes" ]]; then
+  if ! git -C "$source_checkout" cat-file -e "$expected_revision^{commit}"; then
+    print -u2 "Pinned FIPS revision $expected_revision is not available in $source_checkout."
+    print -u2 "Fetch that revision before building the local app."
+    exit 1
+  fi
+  if [[ ! -d "$cached_checkout/.git" ]]; then
+    print "Preparing cached FIPS checkout at the pinned revision"
+    mkdir -p "${cached_checkout:h}"
+    git clone --quiet --no-checkout --shared "$source_checkout" "$cached_checkout"
+    git -C "$cached_checkout" checkout --quiet --detach "$expected_revision"
+  fi
+  cached_revision=$(git -C "$cached_checkout" rev-parse HEAD)
+  cached_changes=$(git -C "$cached_checkout" status --porcelain --untracked-files=no)
+  if [[ "$cached_revision" != "$expected_revision" || -n "$cached_changes" ]]; then
+    print -u2 "The cached FIPS source at $cached_checkout is not pristine at $expected_revision."
+    print -u2 "Remove that build cache before retrying."
+    exit 1
+  fi
+  build_checkout="$cached_checkout"
+fi
+
+signing_identity=${APPLE_SIGNING_IDENTITY:-}
+if [[ -z "$signing_identity" ]]; then
+  signing_identity=$(security find-identity -v -p codesigning 2>/dev/null \
+    | awk -F'"' '/Developer ID Application:.*\(8Z6Q2LZ77W\)/ { print $2; exit }')
+fi
+if [[ -z "$signing_identity" ]]; then
+  print -u2 "No Paper Robin Developer ID Application certificate was found."
+  print -u2 "Import the certificate or set APPLE_SIGNING_IDENTITY explicitly."
+  exit 1
+fi
+
+cd "$project_root"
+print "Building pinned FIPS and lifecycle controller for $target"
+TAURI_ENV_TARGET_TRIPLE="$target" \
+FIPS_CHECKOUT_PATH="$build_checkout" \
+FIPS_BUILD_TARGET_DIR="$project_root/src-tauri/target/fips-local" \
+  bun run prepare:macos-bundle
+
+print "Building signed local FIPS.app (no DMG, universal binary, or notarization)"
+env \
+  -u APPLE_ID \
+  -u APPLE_PASSWORD \
+  -u APPLE_API_KEY \
+  -u APPLE_API_ISSUER \
+  -u APPLE_API_KEY_PATH \
+  APPLE_SIGNING_IDENTITY="$signing_identity" \
+  FIPS_MAC_PACKAGED_BUILD=1 \
+  bun run tauri build \
+    --debug \
+    --target "$target" \
+    --bundles app \
+    --config src-tauri/tauri.developer-id.conf.json
+
+app_path="$project_root/src-tauri/target/$target/debug/bundle/macos/FIPS.app"
+if [[ ! -d "$app_path" ]]; then
+  print -u2 "Tauri completed but the expected app was not found at $app_path"
+  exit 1
+fi
+
+codesign --verify --deep --strict "$app_path"
+
+print ""
+print "Local packaged app:"
+print "  $app_path"
+print ""
+print "The app is signed but not notarized. It was not opened, installed, or registered."
+print "To test Background Items and lifecycle controls, quit any running FIPS app,"
+print "copy this build to /Applications/FIPS.app, then open it manually."

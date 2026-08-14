@@ -44,8 +44,8 @@ jobs:
           path: fips-mac
       - uses: actions/checkout@v4
         with:
-          repository: erskingardner/fips
-          ref: ba161eadb79a782c08278b0af2d2b641b445518a
+          repository: jmcorgan/fips
+          ref: dc3bace9d183eba6a0d199aa2a7a7349ccd2124c
           path: fips
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2

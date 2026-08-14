@@ -2,14 +2,13 @@
   "bundle": {
     "category": "Utility",
     "externalBin": [
-      "binaries/fips",
       "binaries/fips-mac-service"
     ],
     "macOS": {
       "files": {
         "Library/LaunchDaemons/com.paper-robin.fips-mac.service-control.plist": "./launchd/com.paper-robin.fips-mac.service-control.plist",
-        "Library/LaunchDaemons/com.paper-robin.fips-mac.node.plist": "./launchd/com.paper-robin.fips-mac.node.plist",
-        "Resources/fips.default.yaml": "./resources/fips.default.yaml",
+        "Resources/fips-macos-arm64.pkg": "./resources/installers/fips-macos-arm64.pkg",
+        "Resources/fips-macos-x86_64.pkg": "./resources/installers/fips-macos-x86_64.pkg",
         "Resources/FIPS-LICENSE.txt": "./resources/FIPS-LICENSE.txt"
       }
     }

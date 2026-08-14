@@ -18,8 +18,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
-          repository: erskingardner/fips
-          ref: ba161eadb79a782c08278b0af2d2b641b445518a
+          repository: jmcorgan/fips
+          ref: dc3bace9d183eba6a0d199aa2a7a7349ccd2124c
           path: fips-source
       - uses: oven-sh/setup-bun@v2
         with:
@@ -36,6 +36,9 @@ jobs:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_INSTALLER_CERTIFICATE: ${{ secrets.APPLE_INSTALLER_CERTIFICATE }}
+          APPLE_INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERTIFICATE_PASSWORD }}
+          APPLE_INSTALLER_SIGNING_IDENTITY: ${{ secrets.APPLE_INSTALLER_SIGNING_IDENTITY }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
@@ -45,7 +48,7 @@ jobs:
         run: |
           set -euo pipefail
           missing=()
-          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_TEAM_ID; do
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_INSTALLER_CERTIFICATE APPLE_INSTALLER_CERTIFICATE_PASSWORD APPLE_INSTALLER_SIGNING_IDENTITY APPLE_TEAM_ID; do
             if [[ -z "${!name:-}" ]]; then
               missing+=("$name")
             fi
@@ -106,6 +109,29 @@ jobs:
               --output-format json >/dev/null
           fi
       - run: bun install --frozen-lockfile
+      - name: Import Developer ID Installer certificate
+        shell: bash
+        env:
+          APPLE_INSTALLER_CERTIFICATE: ${{ secrets.APPLE_INSTALLER_CERTIFICATE }}
+          APPLE_INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/fips-installer.keychain-db"
+          password="$(openssl rand -hex 24)"
+          certificate="$RUNNER_TEMP/fips-installer.p12"
+          printf '%s' "$APPLE_INSTALLER_CERTIFICATE" | openssl base64 -d -A -out "$certificate"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$certificate" -k "$keychain" -P "$APPLE_INSTALLER_CERTIFICATE_PASSWORD" -T /usr/bin/productsign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain"
+          keychains=("$keychain")
+          while IFS= read -r existing; do
+            if [[ -n "$existing" ]]; then
+              keychains+=("$existing")
+            fi
+          done < <(security list-keychains -d user | sed 's/^[[:space:]]*"//;s/"$//')
+          security list-keychains -d user -s "${keychains[@]}"
       - name: Verify tag matches the application version
         shell: bash
         run: |
@@ -126,6 +152,7 @@ jobs:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_INSTALLER_SIGNING_IDENTITY: ${{ secrets.APPLE_INSTALLER_SIGNING_IDENTITY }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           FIPS_CHECKOUT_PATH: ${{ github.workspace }}/fips-source
@@ -136,6 +163,7 @@ jobs:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_INSTALLER_SIGNING_IDENTITY: ${{ secrets.APPLE_INSTALLER_SIGNING_IDENTITY }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -186,13 +214,22 @@ jobs:
           hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount_dir" -quiet
           app="$mount_dir/FIPS.app"
           binary="$app/Contents/MacOS/fips-mac"
-          fips_binary="$app/Contents/MacOS/fips"
           service_binary="$app/Contents/MacOS/fips-mac-service"
+          arm_package="$app/Contents/Resources/fips-macos-arm64.pkg"
+          intel_package="$app/Contents/Resources/fips-macos-x86_64.pkg"
           test -d "$app"
-          test -x "$fips_binary"
           test -x "$service_binary"
-          test -f "$app/Contents/Library/LaunchDaemons/com.paper-robin.fips-mac.node.plist"
+          test -f "$arm_package"
+          test -f "$intel_package"
           test -f "$app/Contents/Library/LaunchDaemons/com.paper-robin.fips-mac.service-control.plist"
+          pkgutil --check-signature "$arm_package"
+          pkgutil --check-signature "$intel_package"
+          arm_expanded="$(mktemp -d)/package"
+          intel_expanded="$(mktemp -d)/package"
+          pkgutil --expand-full "$arm_package" "$arm_expanded"
+          pkgutil --expand-full "$intel_package" "$intel_expanded"
+          test "$(lipo -archs "$arm_expanded/Payload/usr/local/bin/fips")" = "arm64"
+          test "$(lipo -archs "$intel_expanded/Payload/usr/local/bin/fips")" = "x86_64"
           codesign --verify --deep --strict --verbose=2 "$app"
           spctl --assess --type execute --verbose=2 "$app"
           xcrun stapler validate "$app"
@@ -200,12 +237,10 @@ jobs:
           archs="$(lipo -archs "$binary")"
           grep -qw arm64 <<<"$archs"
           grep -qw x86_64 <<<"$archs"
-          for bundled_binary in "$fips_binary" "$service_binary"; do
-            bundled_archs="$(lipo -archs "$bundled_binary")"
-            grep -qw arm64 <<<"$bundled_archs"
-            grep -qw x86_64 <<<"$bundled_archs"
-            codesign --verify --strict --verbose=2 "$bundled_binary"
-          done
+          bundled_archs="$(lipo -archs "$service_binary")"
+          grep -qw arm64 <<<"$bundled_archs"
+          grep -qw x86_64 <<<"$bundled_archs"
+          codesign --verify --strict --verbose=2 "$service_binary"
           shasum -a 256 "$dmg" > "$dmg.sha256"
       - uses: softprops/action-gh-release@v2
         with:
