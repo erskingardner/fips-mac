@@ -109,21 +109,28 @@ jobs:
               --output-format json >/dev/null
           fi
       - run: bun install --frozen-lockfile
-      - name: Import Developer ID Installer certificate
+      - name: Import Developer ID Application and Installer certificates
         shell: bash
         env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_INSTALLER_CERTIFICATE: ${{ secrets.APPLE_INSTALLER_CERTIFICATE }}
           APPLE_INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERTIFICATE_PASSWORD }}
+          APPLE_INSTALLER_SIGNING_IDENTITY: ${{ secrets.APPLE_INSTALLER_SIGNING_IDENTITY }}
         run: |
           set -euo pipefail
           keychain="$RUNNER_TEMP/fips-installer.keychain-db"
           password="$(openssl rand -hex 24)"
-          certificate="$RUNNER_TEMP/fips-installer.p12"
-          printf '%s' "$APPLE_INSTALLER_CERTIFICATE" | openssl base64 -d -A -out "$certificate"
+          app_certificate="$RUNNER_TEMP/fips-application.p12"
+          installer_certificate="$RUNNER_TEMP/fips-installer.p12"
+          printf '%s' "$APPLE_CERTIFICATE" | openssl base64 -d -A -out "$app_certificate"
+          printf '%s' "$APPLE_INSTALLER_CERTIFICATE" | openssl base64 -d -A -out "$installer_certificate"
           security create-keychain -p "$password" "$keychain"
           security set-keychain-settings -lut 21600 "$keychain"
           security unlock-keychain -p "$password" "$keychain"
-          security import "$certificate" -k "$keychain" -P "$APPLE_INSTALLER_CERTIFICATE_PASSWORD" -T /usr/bin/productsign
+          security import "$app_certificate" -k "$keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security import "$installer_certificate" -k "$keychain" -P "$APPLE_INSTALLER_CERTIFICATE_PASSWORD" -T /usr/bin/productsign
           security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain"
           keychains=("$keychain")
           while IFS= read -r existing; do
@@ -132,6 +139,8 @@ jobs:
             fi
           done < <(security list-keychains -d user | sed 's/^[[:space:]]*"//;s/"$//')
           security list-keychains -d user -s "${keychains[@]}"
+          security find-identity -v -p codesigning "$keychain" | grep -Fq "\"$APPLE_SIGNING_IDENTITY\""
+          security find-identity -v -p basic "$keychain" | grep -Fq "\"$APPLE_INSTALLER_SIGNING_IDENTITY\""
       - name: Verify tag matches the application version
         shell: bash
         run: |
@@ -230,6 +239,15 @@ jobs:
           pkgutil --expand-full "$intel_package" "$intel_expanded"
           test "$(lipo -archs "$arm_expanded/Payload/usr/local/bin/fips")" = "arm64"
           test "$(lipo -archs "$intel_expanded/Payload/usr/local/bin/fips")" = "x86_64"
+          for package_root in "$arm_expanded" "$intel_expanded"; do
+            for executable in fips fipsctl fipstop; do
+              payload_binary="$package_root/Payload/usr/local/bin/$executable"
+              codesign --verify --strict --verbose=2 "$payload_binary"
+              signature_details="$(codesign --display --verbose=4 "$payload_binary" 2>&1)"
+              grep -Eq '^Timestamp=' <<<"$signature_details"
+              grep -Eq 'flags=.*\(runtime\)' <<<"$signature_details"
+            done
+          done
           codesign --verify --deep --strict --verbose=2 "$app"
           spctl --assess --type execute --verbose=2 "$app"
           xcrun stapler validate "$app"

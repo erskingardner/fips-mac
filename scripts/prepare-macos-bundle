@@ -18,6 +18,14 @@ installer_dir="$project_root/src-tauri/resources/installers"
 service_manifest="$project_root/src-tauri/service/Cargo.toml"
 service_target_dir="$project_root/src-tauri/target/service"
 fips_target_dir=${FIPS_BUILD_TARGET_DIR:-"$fips_checkout/target"}
+temporary_dirs=()
+
+cleanup() {
+  if (( ${#temporary_dirs[@]} )); then
+    rm -rf -- "${temporary_dirs[@]}"
+  fi
+}
+trap cleanup EXIT
 
 if [[ ! -f "$fips_checkout/Cargo.toml" ]]; then
   print -u2 "FIPS checkout not found at $fips_checkout"
@@ -88,13 +96,40 @@ for target in $targets; do
   esac
   package_source="$fips_checkout/deploy/fips-$fips_version-macos-$package_arch.pkg"
   package_destination="$installer_dir/fips-macos-$package_arch.pkg"
+  package_to_sign="$package_source"
+  if [[ -n ${APPLE_SIGNING_IDENTITY:-} ]]; then
+    signing_work=$(mktemp -d)
+    temporary_dirs+=("$signing_work")
+    expanded_package="$signing_work/expanded"
+    signed_payload_package="$signing_work/fips-payload-signed.pkg"
+    pkgutil --expand-full "$package_source" "$expanded_package"
+    for executable in fips fipsctl fipstop; do
+      payload_binary="$expanded_package/Payload/usr/local/bin/$executable"
+      codesign \
+        --force \
+        --options runtime \
+        --timestamp \
+        --sign "$APPLE_SIGNING_IDENTITY" \
+        "$payload_binary"
+      codesign --verify --strict --verbose=2 "$payload_binary"
+      signature_details=$(codesign --display --verbose=4 "$payload_binary" 2>&1)
+      print -r -- "$signature_details" | grep -Fq "Authority=$APPLE_SIGNING_IDENTITY"
+      print -r -- "$signature_details" | grep -Eq '^Timestamp='
+      print -r -- "$signature_details" | grep -Eq 'flags=.*\(runtime\)'
+    done
+    pkgutil --flatten "$expanded_package" "$signed_payload_package"
+    package_to_sign="$signed_payload_package"
+  else
+    print -u2 "Warning: packaged unsigned FIPS payload executables for local testing."
+  fi
   if [[ -n ${APPLE_INSTALLER_SIGNING_IDENTITY:-} ]]; then
     productsign \
       --sign "$APPLE_INSTALLER_SIGNING_IDENTITY" \
-      "$package_source" \
+      "$package_to_sign" \
       "$package_destination"
+    pkgutil --check-signature "$package_destination"
   else
-    cp "$package_source" "$package_destination"
+    cp "$package_to_sign" "$package_destination"
     print -u2 "Warning: packaged an unsigned FIPS installer for local testing."
   fi
 

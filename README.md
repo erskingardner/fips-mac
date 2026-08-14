@@ -209,7 +209,7 @@ notarizes the app. Set `FIPS_CHECKOUT_PATH` only when FIPS is not at `../fips`.
 The script refuses a different revision or tracked local changes.
 
 Release tags use `v<version>-build.<build>`, such as
-`v2026.8.14-build.4`. They build the universal Apple Silicon/Intel target and
+`v2026.8.14-build.5`. They build the universal Apple Silicon/Intel target and
 produce a signed, notarized DMG. The release workflow verifies the app and
 helper signatures, both embedded installer signatures, Gatekeeper, stapling,
 and universal architecture slices before publishing a public GitHub release.

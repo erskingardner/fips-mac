@@ -9,7 +9,7 @@ number.
 
 ## [Unreleased]
 
-## [2026.8.14+4] - 2026-08-14
+## [2026.8.14+5] - 2026-08-14
 
 ### Added
 
@@ -46,6 +46,9 @@ number.
 
 ### Fixed
 
+- Signed the FIPS executables inside both embedded installer packages with
+  Developer ID Application, hardened runtime, and secure timestamps so Apple
+  notarization validates the complete nested distribution.
 - Made **Disable app management** use an in-app confirmation flow, report its
   result persistently, and immediately return the UI to monitoring-only mode
   while leaving the standard FIPS installation and running node unchanged.
@@ -96,7 +99,7 @@ number.
   configuration, safe apply and rollback, and package-installation migration.
 - Signed, notarized, and stapled DMG publishing through GitHub Actions.
 
-[Unreleased]: https://github.com/erskingardner/fips-mac/compare/v2026.8.14-build.4...HEAD
-[2026.8.14+4]: https://github.com/erskingardner/fips-mac/compare/v2026.8.13-build.3...v2026.8.14-build.4
+[Unreleased]: https://github.com/erskingardner/fips-mac/compare/v2026.8.14-build.5...HEAD
+[2026.8.14+5]: https://github.com/erskingardner/fips-mac/compare/v2026.8.13-build.3...v2026.8.14-build.5
 [2026.8.13+3]: https://github.com/erskingardner/fips-mac/compare/v2026.8.13...v2026.8.13-build.3
 [2026.8.13+2]: https://github.com/erskingardner/fips-mac/releases/tag/v2026.8.13

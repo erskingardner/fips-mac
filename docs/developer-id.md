@@ -129,8 +129,8 @@ Notarization uses either `APPLE_API_ISSUER`, `APPLE_API_KEY`, and
 Release tags are `v<version>-build.<build>`, for example:
 
 ```sh
-git tag -a v2026.8.14-build.4 -m "FIPS 2026.8.14 (build 4)"
-git push origin v2026.8.14-build.4
+git tag -a v2026.8.14-build.5 -m "FIPS 2026.8.14 (build 5)"
+git push origin v2026.8.14-build.5
 ```
 
 The workflow checks both installer signatures, the management helper and app

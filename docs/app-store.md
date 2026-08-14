@@ -1,7 +1,7 @@
 # Mac App Store and TestFlight
 
 FIPS Mac is shown to users as **FIPS**. Apple Developer team `8Z6Q2LZ77W`,
-bundle identifier `com.paper-robin.fips-mac`, version `2026.8.14`, build `4`,
+bundle identifier `com.paper-robin.fips-mac`, version `2026.8.14`, build `5`,
 and the macOS 13 minimum remain current.
 
 This remains a **monitor-only** distribution track. It does not contain or
@@ -100,7 +100,7 @@ profile, and installer signature.
 The resulting package is written to:
 
 ```text
-src-tauri/target/universal-apple-darwin/release/bundle/macos/FIPS-2026.8.14-4.pkg
+src-tauri/target/universal-apple-darwin/release/bundle/macos/FIPS-2026.8.14-5.pkg
 ```
 
 ## Upload
