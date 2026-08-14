@@ -126,11 +126,13 @@ Notarization uses either `APPLE_API_ISSUER`, `APPLE_API_KEY`, and
 `APPLE_API_KEY_P8_BASE64`, or `APPLE_ID` plus an app-specific
 `APPLE_PASSWORD`.
 
-Release tags are `v<version>-build.<build>`, for example:
+The first release for a date uses `v<version>`. Additional releases that day
+append `-2`, `-3`, and so on. The macOS bundle build number remains independently
+monotonic and does not appear in the public tag. For example:
 
 ```sh
-git tag -a v2026.8.14-build.5 -m "FIPS 2026.8.14 (build 5)"
-git push origin v2026.8.14-build.5
+git tag -a v2026.8.14-2 -m "FIPS 2026.8.14 (release 2)"
+git push origin v2026.8.14-2
 ```
 
 The workflow checks both installer signatures, the management helper and app
