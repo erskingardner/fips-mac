@@ -5,13 +5,15 @@ use tauri::State;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
+    process::Command,
     time::timeout,
 };
 
 const DEFAULT_SOCKET_PATH: &str = "/var/run/fips-mac/service.sock";
 const APP_CONTROL_SOCKET: &str = "/var/run/fips/control.sock";
 const CONTROLLER_PLIST: &str = "com.paper-robin.fips-mac.service-control.plist";
-const NODE_PLIST: &str = "com.paper-robin.fips-mac.node.plist";
+const STANDARD_FIPS_PLIST: &str = "/Library/LaunchDaemons/com.fips.daemon.plist";
+const STANDARD_FIPS_CONFIG: &str = "/usr/local/etc/fips/fips.yaml";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 
@@ -58,21 +60,26 @@ impl ServiceStatus {
             detail: Some(error.message.clone()),
             ..Self::checking()
         };
-        if std::path::Path::new("/Library/LaunchDaemons/com.fips.daemon.plist").is_file() {
+        if std::path::Path::new(STANDARD_FIPS_PLIST).is_file()
+            && std::path::Path::new(STANDARD_FIPS_CONFIG).is_file()
+        {
             status.ownership = "external".into();
-            status.installation = "external".into();
-            status.can_migrate = true;
+            status.installation = "standard".into();
+            status.can_migrate = false;
             status.config_path = Some("/usr/local/etc/fips/fips.yaml".into());
-            status.detail = Some(
-                "An existing package-managed FIPS node was found. FIPS can use or migrate it."
-                    .into(),
-            );
+            status.detail = Some(if status.registration == "bundle_incomplete" {
+                "The standard FIPS installation was found. This development build can monitor it but does not include the management helper."
+                    .into()
+            } else {
+                "The standard FIPS installation was found. Monitoring is available now; enable management to control and configure it."
+                    .into()
+            });
         } else {
             status.ownership = "none".into();
             status.installation = "not_installed".into();
             if status.registration == "bundle_incomplete" {
                 status.detail = Some(
-                    "This development or App Store build monitors FIPS but does not include the app-managed node bundle."
+                    "This development build can monitor FIPS but does not include the installer or management helper."
                         .into(),
                 );
             }
@@ -280,16 +287,10 @@ fn registration_status() -> String {
         let controller = AppService::new(ServiceType::Daemon {
             plist_name: CONTROLLER_PLIST,
         });
-        let node = AppService::new(ServiceType::Daemon {
-            plist_name: NODE_PLIST,
-        });
-        match (controller.status(), node.status()) {
-            (RegistrationStatus::Enabled, RegistrationStatus::Enabled) => "enabled".into(),
-            (RegistrationStatus::RequiresApproval, _)
-            | (_, RegistrationStatus::RequiresApproval) => "requires_approval".into(),
-            (RegistrationStatus::NotFound, _) | (_, RegistrationStatus::NotFound) => {
-                "bundle_incomplete".into()
-            }
+        match controller.status() {
+            RegistrationStatus::Enabled => "enabled".into(),
+            RegistrationStatus::RequiresApproval => "requires_approval".into(),
+            RegistrationStatus::NotFound => "bundle_incomplete".into(),
             _ => "not_registered".into(),
         }
     }
@@ -303,6 +304,9 @@ fn registration_status() -> String {
 pub async fn get_node_installation(
     state: State<'_, crate::AppState>,
 ) -> Result<ServiceStatus, ServiceError> {
+    if let Some(status) = state.preview.service_status() {
+        return Ok(status);
+    }
     Ok(query_status(state.service_socket_path.clone()).await)
 }
 
@@ -310,23 +314,31 @@ pub async fn get_node_installation(
 pub async fn use_existing_node(
     state: State<'_, crate::AppState>,
 ) -> Result<ServiceStatus, ServiceError> {
+    if let Some(status) = state.preview.use_existing() {
+        state.refresh.notify_one();
+        return Ok(status);
+    }
     #[cfg(target_os = "macos")]
     {
+        if !standard_fips_is_installed() {
+            return Err(ServiceError::new(
+                "not_installed",
+                "The standard FIPS installation was not found.",
+            ));
+        }
         register_daemon(CONTROLLER_PLIST)?;
         if registration_status() == "requires_approval" {
             return Err(ServiceError::new(
                 "requires_approval",
-                "macOS registered the FIPS services, but an administrator still needs to approve FIPS in System Settings → General → Login Items.",
+                "macOS registered the FIPS management helper, but an administrator still needs to approve FIPS in System Settings → General → Login Items.",
             ));
         }
         wait_for_controller(&state).await?;
-        let status = ServiceClient::new(state.service_socket_path.clone())
-            .command("show_service")
-            .await?;
-        if status.ownership != "external" {
+        let status = perform_service_action(&state, "prepare_install").await?;
+        if status.ownership != "app_managed" {
             return Err(ServiceError::new(
                 "not_installed",
-                "No package-managed FIPS installation was found.",
+                "The standard FIPS installation was not found.",
             ));
         }
         state.refresh.notify_one();
@@ -347,52 +359,39 @@ pub async fn register_node_service(
     state: State<'_, crate::AppState>,
     migrate: bool,
 ) -> Result<ServiceStatus, ServiceError> {
+    if let Some(status) = state.preview.install() {
+        let _ = migrate;
+        state.refresh.notify_one();
+        return Ok(status);
+    }
     #[cfg(target_os = "macos")]
     {
+        let _ = migrate;
+        if !standard_fips_is_installed() {
+            run_standard_installer().await?;
+        }
+        if !standard_fips_is_installed() {
+            return Err(ServiceError::new(
+                "install_cancelled",
+                "FIPS was not installed. Complete the macOS Installer to continue.",
+            ));
+        }
         register_daemon(CONTROLLER_PLIST)?;
-        register_daemon(NODE_PLIST)?;
         if registration_status() == "requires_approval" {
             return Err(ServiceError::new(
                 "requires_approval",
-                "macOS registered the FIPS services, but an administrator still needs to approve FIPS in System Settings → General → Login Items.",
+                "macOS registered the FIPS management helper, but an administrator still needs to approve FIPS in System Settings → General → Login Items.",
             ));
         }
         wait_for_controller(&state).await?;
 
-        let preparation = if migrate {
-            "migrate"
-        } else {
-            "prepare_install"
-        };
-        if let Err(error) = perform_service_action(&state, preparation).await {
-            let client = ServiceClient::new(state.service_socket_path.clone());
-            let _ = client.command("rollback_migration").await;
-            let _ = unregister_daemon(NODE_PLIST);
-            return Err(error);
-        }
-
+        perform_service_action(&state, "prepare_install").await?;
         let client = ServiceClient::new(state.service_socket_path.clone());
-        let previous_control_path = state.socket_path.lock().unwrap().clone();
         let started = match client.command("start").await {
             Ok(status) => status,
-            Err(error) => {
-                let _ = client.command("rollback_migration").await;
-                let _ = unregister_daemon(NODE_PLIST);
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         };
-        if let Err(error) = wait_for_node_control(&state).await {
-            let _ = client.command("rollback_migration").await;
-            let _ = unregister_daemon(NODE_PLIST);
-            *state.socket_path.lock().unwrap() = previous_control_path;
-            return Err(error);
-        }
-        if migrate && let Err(error) = client.command("finish_migration").await {
-            let _ = client.command("rollback_migration").await;
-            let _ = unregister_daemon(NODE_PLIST);
-            *state.socket_path.lock().unwrap() = previous_control_path;
-            return Err(error);
-        }
+        wait_for_node_control(&state).await?;
         state.refresh.notify_one();
         Ok(started)
     }
@@ -401,9 +400,14 @@ pub async fn register_node_service(
         let _ = (state, migrate);
         Err(ServiceError::new(
             "unsupported",
-            "App-managed FIPS is available only on macOS 13 or newer.",
+            "Managing the FIPS node from this app is available only on macOS 13 or newer.",
         ))
     }
+}
+
+fn standard_fips_is_installed() -> bool {
+    std::path::Path::new(STANDARD_FIPS_PLIST).is_file()
+        && std::path::Path::new(STANDARD_FIPS_CONFIG).is_file()
 }
 
 #[tauri::command]
@@ -417,34 +421,43 @@ pub async fn repair_node_service(
 pub async fn remove_node_service(
     state: State<'_, crate::AppState>,
 ) -> Result<ServiceStatus, ServiceError> {
+    if let Some(status) = state.preview.service_action("remove_keep_data") {
+        state.refresh.notify_one();
+        return Ok(status);
+    }
     #[cfg(target_os = "macos")]
     {
         use smappservice_rs::{AppService, ServiceManagementError, ServiceType};
-        if state.service_socket_path.exists() {
-            let removal = perform_service_action(&state, "remove_keep_data").await?;
-            if removal.ownership == "external" {
-                let _ = wait_for_node_control(&state).await;
-            }
-        }
-        for plist in [NODE_PLIST, CONTROLLER_PLIST] {
-            let service = AppService::new(ServiceType::Daemon { plist_name: plist });
-            match service.unregister() {
-                Ok(()) | Err(ServiceManagementError::JobNotFound) => {}
-                Err(error) => {
-                    return Err(ServiceError::new(
-                        "registration",
-                        format!("macOS could not unregister {plist}: {error}"),
-                    ));
-                }
+        let service = AppService::new(ServiceType::Daemon {
+            plist_name: CONTROLLER_PLIST,
+        });
+        match service.unregister() {
+            Ok(()) | Err(ServiceManagementError::JobNotFound) => {}
+            Err(error) => {
+                return Err(ServiceError::new(
+                    "registration",
+                    format!("macOS could not unregister the FIPS management helper: {error}"),
+                ));
             }
         }
         state.refresh.notify_one();
         Ok(ServiceStatus {
+            available: false,
+            state: "unknown".into(),
+            enabled: false,
+            loaded: false,
+            running: false,
+            controller_version: None,
+            pid: None,
+            last_exit_status: None,
             detail: Some(
-                "The app-managed node was removed. Its configuration was preserved.".into(),
+                "FIPS management was disabled. The standard FIPS installation is unchanged.".into(),
             ),
+            ownership: "external".into(),
+            installation: "standard".into(),
+            can_migrate: false,
+            config_path: Some(STANDARD_FIPS_CONFIG.into()),
             registration: registration_status(),
-            ..ServiceStatus::checking()
         })
     }
     #[cfg(not(target_os = "macos"))]
@@ -458,7 +471,10 @@ pub async fn remove_node_service(
 }
 
 #[tauri::command]
-pub fn open_background_settings() {
+pub fn open_background_settings(state: State<'_, crate::AppState>) {
+    if state.preview.status().enabled {
+        return;
+    }
     #[cfg(target_os = "macos")]
     smappservice_rs::AppService::open_system_settings_login_items();
 }
@@ -482,6 +498,52 @@ async fn wait_for_controller(state: &crate::AppState) -> Result<(), ServiceError
                 ));
             }
         }
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn run_standard_installer() -> Result<(), ServiceError> {
+    let executable = std::env::current_exe().map_err(|error| {
+        ServiceError::new("installer", format!("Could not locate FIPS.app: {error}"))
+    })?;
+    let contents = executable
+        .parent()
+        .and_then(std::path::Path::parent)
+        .ok_or_else(|| ServiceError::new("installer", "FIPS.app has an invalid bundle layout."))?;
+    let package = contents.join("Resources").join(installer_package_name());
+    if !package.is_file() {
+        return Err(ServiceError::new(
+            "bundle_incomplete",
+            "This build does not include the standard FIPS installer.",
+        ));
+    }
+    let output = Command::new("/usr/bin/open")
+        .arg("-W")
+        .arg(&package)
+        .output()
+        .await
+        .map_err(|error| {
+            ServiceError::new(
+                "installer",
+                format!("Could not open macOS Installer: {error}"),
+            )
+        })?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(ServiceError::new(
+            "installer",
+            "macOS Installer did not complete successfully.",
+        ))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn installer_package_name() -> &'static str {
+    if cfg!(target_arch = "aarch64") {
+        "fips-macos-arm64.pkg"
+    } else {
+        "fips-macos-x86_64.pkg"
     }
 }
 
@@ -514,7 +576,7 @@ async fn wait_for_node_control(state: &crate::AppState) -> Result<PathBuf, Servi
         if tokio::time::Instant::now() >= deadline {
             return Err(ServiceError::new(
                 "startup_failed",
-                "The bundled FIPS node started but did not open a usable control socket. The installation was rolled back.",
+                "FIPS started but did not open a usable control socket. Check /usr/local/etc/fips/fips.yaml and the FIPS logs.",
             ));
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -534,19 +596,6 @@ fn register_daemon(plist: &'static str) -> Result<(), ServiceError> {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn unregister_daemon(plist: &'static str) -> Result<(), ServiceError> {
-    use smappservice_rs::{AppService, ServiceManagementError, ServiceType};
-    let service = AppService::new(ServiceType::Daemon { plist_name: plist });
-    match service.unregister() {
-        Ok(()) | Err(ServiceManagementError::JobNotFound) => Ok(()),
-        Err(error) => Err(ServiceError::new(
-            "registration",
-            format!("macOS could not unregister {plist}: {error}"),
-        )),
-    }
-}
-
 pub async fn query_status(path: PathBuf) -> ServiceStatus {
     match ServiceClient::new(path).command("show_service").await {
         Ok(status) => status,
@@ -558,6 +607,10 @@ pub async fn perform_service_action(
     state: &crate::AppState,
     command: &str,
 ) -> Result<ServiceStatus, ServiceError> {
+    if let Some(status) = state.preview.service_action(command) {
+        state.refresh.notify_one();
+        return Ok(status);
+    }
     if state
         .service_action_busy
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -594,6 +647,9 @@ pub async fn restart_fips_service(
 
 #[tauri::command]
 pub async fn get_config(state: State<'_, crate::AppState>) -> Result<Value, ServiceError> {
+    if let Some(result) = state.preview.config() {
+        return result.map_err(|message| ServiceError::new("preview", message));
+    }
     ServiceClient::new(state.service_socket_path.clone())
         .query("show_config")
         .await
@@ -605,6 +661,9 @@ pub async fn validate_config(
     expected_revision: String,
     yaml: String,
 ) -> Result<Value, ServiceError> {
+    if let Some(result) = state.preview.validate_config(&expected_revision, &yaml) {
+        return Ok(result);
+    }
     ServiceClient::new(state.service_socket_path.clone())
         .query_with_params(
             "validate_config",
@@ -642,6 +701,10 @@ pub async fn apply_config(
     expected_revision: String,
     yaml: String,
 ) -> Result<Value, ServiceError> {
+    if let Some(result) = state.preview.apply_config(&expected_revision, yaml.clone()) {
+        state.refresh.notify_one();
+        return result.map_err(|message| ServiceError::new("preview", message));
+    }
     mutate_config(
         &state,
         "apply_config",
@@ -652,6 +715,9 @@ pub async fn apply_config(
 
 #[tauri::command]
 pub async fn get_apply_status(state: State<'_, crate::AppState>) -> Result<Value, ServiceError> {
+    if let Some(status) = state.preview.apply_status() {
+        return Ok(status);
+    }
     ServiceClient::new(state.service_socket_path.clone())
         .query("show_config_apply")
         .await
@@ -662,6 +728,10 @@ pub async fn reset_config(
     state: State<'_, crate::AppState>,
     expected_revision: String,
 ) -> Result<Value, ServiceError> {
+    if let Some(result) = state.preview.reset_config(&expected_revision) {
+        state.refresh.notify_one();
+        return result.map_err(|message| ServiceError::new("preview", message));
+    }
     mutate_config(
         &state,
         "reset_managed_config",
@@ -675,6 +745,18 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
     use tokio::{io::AsyncWriteExt, net::UnixListener};
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn selects_the_native_standard_installer() {
+        assert_eq!(installer_package_name(), "fips-macos-arm64.pkg");
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    #[test]
+    fn selects_the_native_standard_installer() {
+        assert_eq!(installer_package_name(), "fips-macos-x86_64.pkg");
+    }
 
     #[tokio::test]
     async fn parses_service_status_from_controller() {

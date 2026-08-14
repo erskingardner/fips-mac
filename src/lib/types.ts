@@ -16,7 +16,7 @@ export interface ServiceStatus {
   last_exit_status?: number;
   detail?: string;
   ownership: "app_managed" | "external" | "none" | "conflict" | "unknown";
-  installation: "app_managed" | "external" | "not_installed" | "conflict" | "checking";
+  installation: "standard" | "app_managed" | "external" | "not_installed" | "conflict" | "checking";
   can_migrate: boolean;
   config_path?: string;
   registration: "enabled" | "requires_approval" | "not_registered" | "bundle_incomplete" | "unsupported";
@@ -27,7 +27,20 @@ export interface AppPreferences {
   open_dashboard_at_launch: boolean;
 }
 
+export interface PreviewScenario {
+  id: string;
+  label: string;
+}
+
+export interface ProductPreviewStatus {
+  available: boolean;
+  enabled: boolean;
+  scenario: string;
+  scenarios: PreviewScenario[];
+}
+
 export interface MonitorSnapshot {
+  preview: boolean;
   health: Health;
   detail: string;
   socket_path: string;
@@ -52,6 +65,33 @@ export interface Peer {
   tree_depth?: number;
   stats?: Record<string, unknown>;
   mmp?: Record<string, unknown>;
+}
+
+export interface MmpLayerMetrics {
+  loss_rate?: number;
+  smoothed_loss?: number;
+  srtt_ms?: number;
+  etx?: number;
+  smoothed_etx?: number;
+}
+
+export interface MmpPeerMeasurement {
+  peer: string;
+  display_name?: string;
+  mode?: "full" | "lightweight" | "minimal" | string;
+  link_layer?: MmpLayerMetrics;
+}
+
+export interface MmpSessionMeasurement {
+  remote: string;
+  display_name?: string;
+  mode?: "full" | "lightweight" | "minimal" | string;
+  session_layer?: MmpLayerMetrics;
+}
+
+export interface MmpSnapshot {
+  peers: MmpPeerMeasurement[];
+  sessions: MmpSessionMeasurement[];
 }
 
 export interface Transport {

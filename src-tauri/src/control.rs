@@ -139,16 +139,20 @@ pub fn resolve_socket_path(explicit: Option<PathBuf>) -> PathBuf {
     if let Some(path) = std::env::var_os("FIPS_MAC_SOCKET") {
         return PathBuf::from(path);
     }
-    let candidates = [
-        PathBuf::from("/var/run/fips/control.sock"),
-        PathBuf::from("/run/fips/control.sock"),
-        PathBuf::from("/tmp/fips-control.sock"),
-    ];
+    let candidates = socket_candidates();
     candidates
         .iter()
         .find(|candidate| candidate.exists())
         .cloned()
         .unwrap_or_else(|| candidates[0].clone())
+}
+
+fn socket_candidates() -> Vec<PathBuf> {
+    vec![
+        PathBuf::from("/var/run/fips/control.sock"),
+        PathBuf::from("/run/fips/control.sock"),
+        PathBuf::from("/tmp/fips-control.sock"),
+    ]
 }
 
 fn client(state: &State<'_, crate::AppState>) -> ControlClient {
@@ -164,12 +168,26 @@ pub async fn get_snapshot(
 
 #[tauri::command]
 pub async fn get_peers(state: State<'_, crate::AppState>) -> Result<Value, ClientError> {
+    if let Some(peers) = state.preview.peers() {
+        return Ok(peers);
+    }
     client(&state).query("show_peers").await
 }
 
 #[tauri::command]
 pub async fn get_transports(state: State<'_, crate::AppState>) -> Result<Value, ClientError> {
+    if let Some(transports) = state.preview.transports() {
+        return Ok(transports);
+    }
     client(&state).query("show_transports").await
+}
+
+#[tauri::command]
+pub async fn get_mmp(state: State<'_, crate::AppState>) -> Result<Value, ClientError> {
+    if let Some(mmp) = state.preview.mmp() {
+        return Ok(mmp);
+    }
+    client(&state).query("show_mmp").await
 }
 
 #[tauri::command]
@@ -179,6 +197,14 @@ pub async fn connect_peer(
     address: String,
     transport: String,
 ) -> Result<Value, ClientError> {
+    if let Some(result) =
+        state
+            .preview
+            .connect_peer(npub.clone(), address.clone(), transport.clone())
+    {
+        state.refresh.notify_one();
+        return Ok(result);
+    }
     client(&state)
         .query_with_params(
             "connect",
@@ -192,6 +218,10 @@ pub async fn disconnect_peer(
     state: State<'_, crate::AppState>,
     npub: String,
 ) -> Result<Value, ClientError> {
+    if let Some(result) = state.preview.disconnect_peer(npub.clone()) {
+        state.refresh.notify_one();
+        return Ok(result);
+    }
     client(&state)
         .query_with_params("disconnect", json!({ "npub": npub }))
         .await
@@ -202,6 +232,12 @@ pub async fn set_socket_path(
     state: State<'_, crate::AppState>,
     socket_path: String,
 ) -> Result<String, ClientError> {
+    if !crate::DEVELOPMENT_TOOLS_INCLUDED {
+        return Err(ClientError::new(
+            "unavailable",
+            "Custom control sockets are available only when running `bun run tauri dev`.",
+        ));
+    }
     let path = PathBuf::from(socket_path.trim());
     if !path.is_absolute() {
         return Err(ClientError::new(
@@ -234,6 +270,19 @@ mod tests {
                 .unwrap()
                 .subsec_nanos()
         ))
+    }
+
+    #[test]
+    fn all_app_modes_discover_supported_fips_socket_locations() {
+        let candidates = socket_candidates();
+        assert_eq!(
+            candidates,
+            vec![
+                PathBuf::from("/var/run/fips/control.sock"),
+                PathBuf::from("/run/fips/control.sock"),
+                PathBuf::from("/tmp/fips-control.sock"),
+            ]
+        );
     }
 
     #[tokio::test]

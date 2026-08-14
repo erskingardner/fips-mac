@@ -1,6 +1,6 @@
 [package]
 name = "fips-mac-service"
-version = "2026.8.13"
+version = "2026.8.14"
 description = "Privileged lifecycle controller for the FIPS Mac app"
 authors = ["Paper Robin"]
 license = "AGPL-3.0-only"
@@ -8,7 +8,7 @@ repository = "https://github.com/erskingardner/fips-mac"
 edition = "2024"
 
 [dependencies]
-fips = { git = "https://github.com/erskingardner/fips", rev = "ba161eadb79a782c08278b0af2d2b641b445518a" }
+fips = { git = "https://github.com/jmcorgan/fips", rev = "dc3bace9d183eba6a0d199aa2a7a7349ccd2124c" }
 hex = "0.4"
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
