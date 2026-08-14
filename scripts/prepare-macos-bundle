@@ -72,9 +72,11 @@ for target in $targets; do
 
   package_binary_dir="$fips_checkout/target/$target/release"
   mkdir -p "$package_binary_dir"
-  for executable in fips fipsctl fipstop; do
-    cp "$fips_target_dir/$target/release/$executable" "$package_binary_dir/$executable"
-  done
+  if [[ "$fips_target_dir" != "$fips_checkout/target" ]]; then
+    for executable in fips fipsctl fipstop; do
+      cp "$fips_target_dir/$target/release/$executable" "$package_binary_dir/$executable"
+    done
+  fi
   fips_version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$fips_checkout/Cargo.toml" | head -1)
   "$fips_checkout/packaging/macos/build-pkg.sh" \
     --no-build \
