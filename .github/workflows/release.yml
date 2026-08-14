@@ -243,6 +243,18 @@ jobs:
           test -f "$app/Contents/Library/LaunchDaemons/com.paper-robin.fips-mac.service-control.plist"
           pkgutil --check-signature "$arm_package"
           pkgutil --check-signature "$intel_package"
+          for package in "$arm_package" "$intel_package"; do
+            payload_files="$(pkgutil --payload-files "$package")"
+            for required_path in \
+              ./usr/local/bin/fips \
+              ./usr/local/bin/fipsctl \
+              ./usr/local/bin/fipstop \
+              ./usr/local/etc/fips/fips.yaml.default \
+              ./usr/local/etc/fips/hosts.default \
+              ./Library/LaunchDaemons/com.fips.daemon.plist; do
+              grep -Fxq "$required_path" <<<"$payload_files"
+            done
+          done
           arm_expanded="$(mktemp -d)/package"
           intel_expanded="$(mktemp -d)/package"
           pkgutil --expand-full "$arm_package" "$arm_expanded"

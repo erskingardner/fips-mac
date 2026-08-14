@@ -9,6 +9,16 @@ number.
 
 ## [Unreleased]
 
+## [2026.8.14-3] - 2026-08-14
+
+### Fixed
+
+- Rebuilt signed FIPS component packages with `pkgbuild` so macOS Installer
+  receives a valid compressed payload instead of an expanded directory tree.
+- Added release gates that require Installer to enumerate the FIPS binaries,
+  default configuration, hosts file, and LaunchDaemon from both architecture
+  packages before publishing a DMG.
+
 ## [2026.8.14-2] - 2026-08-14
 
 ### Changed
@@ -119,7 +129,8 @@ number.
   configuration, safe apply and rollback, and package-installation migration.
 - Signed, notarized, and stapled DMG publishing through GitHub Actions.
 
-[Unreleased]: https://github.com/erskingardner/fips-mac/compare/v2026.8.14-2...HEAD
+[Unreleased]: https://github.com/erskingardner/fips-mac/compare/v2026.8.14-3...HEAD
+[2026.8.14-3]: https://github.com/erskingardner/fips-mac/compare/v2026.8.14-2...v2026.8.14-3
 [2026.8.14-2]: https://github.com/erskingardner/fips-mac/compare/v2026.8.14-build.5...v2026.8.14-2
 [2026.8.14+5]: https://github.com/erskingardner/fips-mac/compare/v2026.8.13-build.3...v2026.8.14-build.5
 [2026.8.13+3]: https://github.com/erskingardner/fips-mac/compare/v2026.8.13...v2026.8.13-build.3

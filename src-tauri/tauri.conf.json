@@ -37,7 +37,7 @@
       "icons/icon.ico"
     ],
     "macOS": {
-      "bundleVersion": "6",
+      "bundleVersion": "7",
       "minimumSystemVersion": "13.0"
     }
   }

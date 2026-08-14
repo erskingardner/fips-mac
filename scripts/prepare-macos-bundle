@@ -117,7 +117,17 @@ for target in $targets; do
       print -r -- "$signature_details" | grep -Eq '^Timestamp='
       print -r -- "$signature_details" | grep -Eq 'flags=.*\(runtime\)'
     done
-    pkgutil --flatten "$expanded_package" "$signed_payload_package"
+    # `pkgutil --flatten` cannot rebuild an `--expand-full` component package:
+    # it stores Payload/usr/... directly in the XAR instead of creating the
+    # compressed cpio Payload archive that Installer expects. Recreate the
+    # component package from the modified root and original scripts instead.
+    pkgbuild \
+      --root "$expanded_package/Payload" \
+      --scripts "$expanded_package/Scripts" \
+      --identifier com.fips.pkg \
+      --version "$fips_version" \
+      --ownership recommended \
+      "$signed_payload_package"
     package_to_sign="$signed_payload_package"
   else
     print -u2 "Warning: packaged unsigned FIPS payload executables for local testing."
@@ -132,6 +142,17 @@ for target in $targets; do
     cp "$package_to_sign" "$package_destination"
     print -u2 "Warning: packaged an unsigned FIPS installer for local testing."
   fi
+
+  payload_files=$(pkgutil --payload-files "$package_destination")
+  for required_path in \
+    ./usr/local/bin/fips \
+    ./usr/local/bin/fipsctl \
+    ./usr/local/bin/fipstop \
+    ./usr/local/etc/fips/fips.yaml.default \
+    ./usr/local/etc/fips/hosts.default \
+    ./Library/LaunchDaemons/com.fips.daemon.plist; do
+    grep -Fxq "$required_path" <<<"$payload_files"
+  done
 
   print "Building FIPS Mac service for $target"
   cargo build \
