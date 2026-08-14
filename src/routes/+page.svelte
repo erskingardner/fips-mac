@@ -82,6 +82,7 @@
   let serviceBusy = $state(false);
   let serviceTransition = $state("");
   let onboardingOpen = $state(false);
+  let disableManagementOpen = $state(false);
   let installBusy = $state(false);
   let installMessage = $state("");
   let pendingInstallAction = $state<"install" | "existing">("install");
@@ -440,16 +441,19 @@
   }
 
   async function removeManagedNode() {
-    if (!isTauri() || installBusy || !confirm("Disable management from this app? The standard FIPS installation and running node will remain unchanged.")) return;
+    if (!isTauri() || installBusy) return;
+    disableManagementOpen = false;
     installBusy = true;
+    installMessage = "Disabling app management…";
     try {
       const service = await invoke<ServiceStatus>("remove_node_service");
       snapshot = { ...snapshot, service };
-      showToast("App management was disabled. The FIPS installation is unchanged.");
-      await refreshProductPreview();
+      installMessage = "App management was disabled. The FIPS installation and node are unchanged.";
+      showToast(installMessage);
       onboardingOpen = true;
     } catch (error) {
-      showToast(errorMessage(error));
+      installMessage = errorMessage(error);
+      showToast(installMessage);
     } finally {
       installBusy = false;
     }
@@ -998,9 +1002,10 @@
                 {:else if snapshot.service.ownership === "none" || snapshot.service.installation === "not_installed"}<button class="primary settings-action" onclick={() => (onboardingOpen = true)}>Install FIPS</button>
                 {:else if snapshot.service.ownership === "external"}<button class="settings-action" onclick={() => (onboardingOpen = true)}>{snapshot.service.available ? "Manage installation" : "Enable controls"}</button>
                 {:else if snapshot.service.ownership === "conflict"}<button class="settings-action" disabled={installBusy} onclick={repairNode}>Repair</button>
-                {:else}<button class="danger-text" disabled={installBusy} onclick={removeManagedNode}>Disable app management</button>{/if}
+                {:else}<button class="danger-text" disabled={installBusy} onclick={() => (disableManagementOpen = true)}>Disable app management</button>{/if}
               </div>
             </div>
+            {#if installMessage}<p class="install-message settings-install-message" aria-live="polite">{installMessage}</p>{/if}
           </section>
 
           {:else if settingsPage === "node"}
@@ -1153,6 +1158,17 @@
   </div>
 {/if}
 
+{#if disableManagementOpen}
+  <div class="modal-backdrop" role="presentation" onclick={(event) => event.target === event.currentTarget && (disableManagementOpen = false)}>
+    <div class="modal" role="alertdialog" aria-modal="true" aria-labelledby="disable-management-title">
+      <span>DISABLE APP MANAGEMENT</span>
+      <h2 id="disable-management-title">Keep FIPS running independently?</h2>
+      <p>The standard FIPS installation, configuration, identity, and current running state will remain unchanged. This app will continue monitoring the node, but lifecycle and configuration controls will be unavailable until management is enabled again.</p>
+      <div class="modal-actions"><button onclick={() => (disableManagementOpen = false)}>Cancel</button><button class="danger" style="width: auto" disabled={installBusy} onclick={removeManagedNode}>{installBusy ? "Disabling…" : "Disable management"}</button></div>
+    </div>
+  </div>
+{/if}
+
 {#if toast}{#key toastSequence}<button class="toast" aria-live="polite" onclick={dismissToast}>{toast}<span>×</span></button>{/key}{/if}
 
 <style>
@@ -1204,6 +1220,6 @@
   .peer-form-title { display: flex; align-items: flex-start; justify-content: space-between; }.peer-editor { margin: 0; padding: 15px 0 18px; border-bottom: 1px solid #20362d; }.peer-editor-title { display: flex; justify-content: space-between; }.peer-editor-title strong { font-size: 11px; }.danger-text { color: #df7e70; }.empty.embedded { min-height: 180px; border-top: 1px dashed #294038; border-bottom: 1px dashed #294038; border-radius: 0; }
   .yaml-panel { padding-left: 0; }.yaml-panel textarea { width: 100%; min-height: 415px; resize: vertical; padding: 14px; border: 1px solid #233831; border-radius: 4px; outline: 0; color: #b9d8ca; background: #06100d; font: 10.5px/1.58 ui-monospace, SFMono-Regular, Menlo, monospace; tab-size: 2; }.editor-footer { display: flex; justify-content: space-between; margin-top: 8px; color: #60756d; font-size: 9px; }.inline-error,.apply-message { margin: 10px 0; padding: 11px 13px; border: 1px solid #57342e; border-radius: 4px; color: #de8b7d; background: #201411; font-size: 10.5px; }.apply-message { border-color: #2a4c3d; color: #84cbb0; background: #102019; }.review-panel { margin-top: 14px; padding: 17px 0; border-top: 1px solid #244036; border-bottom: 1px solid #244036; }.review-head h2 { margin: 5px 0 0; font-size: 15px; }.impact { color: #76d4b2; font-size: 9px; font-weight: 650; }.impact.restart { color: #dfb567; }.diff-list { margin-top: 14px; }.diff-list>div { display: grid; grid-template-columns: minmax(120px,.65fr) 1.4fr; gap: 15px; padding: 10px 0; border-top: 1px solid #1c3028; font-size: 9px; }.diff-list>div>span { display: grid; grid-template-columns: 1fr 15px 1fr; gap: 6px; min-width: 0; }.diff-list del,.diff-list ins { overflow: hidden; color: #967b76; text-decoration: none; text-overflow: ellipsis; }.diff-list ins { color: #7bb69f; }.diff-list b { color: #536960; text-align: center; }.warnings { color: #d2ae68; font-size: 9px; }.validation-errors { margin-top: 14px; }.validation-errors>div { padding: 10px 12px; border-left: 2px solid #54332e; color: #de8b7d; }.validation-errors code { color: #e29183; font-size: 9px; }.validation-errors p { margin: 5px 0 0; color: #b9877f; font-size: 9px; line-height: 1.45; }.settings-actions { display: flex; align-items: center; gap: 7px; margin: 11px 0 18px; padding-top: 2px; }.settings-actions>span { flex: 1; }.settings-action { padding: 6px 10px; font-size: 10.5px; }.developer-settings { padding-top: 2px; }.developer-settings p { margin: 12px 0; color: #657a72; font-size: 10.5px; }.developer-connection { display: grid; grid-template-columns: minmax(0,1fr) minmax(300px,.9fr); align-items: end; gap: 26px; padding-top: 18px; border-top: 1px solid #1b3028; }.developer-connection strong { font-size: 12px; }.developer-connection p { max-width: 520px; margin: 5px 0 0; line-height: 1.45; }.preview-settings { display: grid; grid-template-columns: 1.4fr 1fr; gap: 22px; margin: 12px 0 22px; padding: 12px 0 18px; border-bottom: 1px solid #1b3028; }.preview-settings .toggle-row { border: 0; }.preview-settings .field { margin: 0; }.path-field { display: flex; gap: 8px; }.path-field input { flex: 1; }.upgrade-card { min-height: 300px; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }.upgrade-card h2 { margin-bottom: 8px; font-size: 16px; }.upgrade-card p { max-width: 440px; color: #7c9088; font-size: 11px; }.upgrade-icon { display: grid; place-items: center; width: 48px; height: 48px; margin-bottom: 14px; border-radius: 50%; color: #e0b565; background: #2a2214; }.muted { color: #5f746c !important; }
   .modal-backdrop { position: fixed; z-index: 20; inset: 0; display: grid; place-items: center; background: rgba(1,6,4,.72); backdrop-filter: blur(5px); }.modal { position: relative; width: min(500px,calc(100vw - 50px)); padding: 25px; border: 1px solid #2b4138; border-radius: 13px; background: #0d1b17; box-shadow: 0 30px 80px rgba(0,0,0,.45); }.modal h2 { margin: 6px 0; font-size: 20px; }.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 22px; padding-top: 15px; border-top: 1px solid #1d3029; }.toast { position: fixed; z-index: 30; right: 22px; bottom: 21px; display: flex; gap: 18px; align-items: center; max-width: 420px; border-color: #315447; color: #bee0d3; background: #132820; box-shadow: 0 16px 50px rgba(0,0,0,.35); font-size: 10px; animation: toast-life 5s ease both; }.toast span { color: #688178; }@keyframes toast-life { 0% { opacity: 0; transform: translateY(5px); } 4%,90% { opacity: 1; transform: translateY(0); } 100% { opacity: 0; transform: translateY(3px); } }.floating-error { position: fixed; right: 25px; bottom: 24px; padding: 10px 13px; border: 1px solid #51342f; border-radius: 8px; color: #dc897b; background: #201411; font-size: 9px; }.loading { display: grid; min-height: 260px; place-items: center; color: #60756d; font-size: 11px; }
-  .onboarding-backdrop { background: rgba(1,6,4,.83); }.onboarding-modal { width: min(610px,calc(100vw - 50px)); padding: 30px; }.onboarding-modal>span { color: #5fd7aa; font-size: 9px; font-weight: 750; letter-spacing: .18em; }.onboarding-modal h2 { margin: 8px 0; font-size: 23px; }.onboarding-modal>p { max-width: none; }.onboarding-modal code { color: #80aa9a; }.onboarding-mark { display: grid; width: 52px; height: 52px; margin-bottom: 20px; place-items: center; border: 1px solid #285041; border-radius: 14px; color: #59dba9; background: #10261e; }.install-summary { display: grid; grid-template-columns: repeat(3,1fr); gap: 12px; margin-top: 22px; }.install-summary>div { display: flex; align-items: flex-start; gap: 9px; padding-top: 12px; border-top: 1px solid #20362d; color: #55cfa1; }.install-summary span { display: flex; flex-direction: column; gap: 4px; }.install-summary strong { color: #dcebe5; font-size: 10.5px; }.install-summary small { color: #687e75; font-size: 9px; line-height: 1.4; }.approval-steps { margin: 20px 0 0; padding: 14px 14px 14px 34px; border-top: 1px solid #20362d; border-bottom: 1px solid #20362d; color: #94a79f; font-size: 10.5px; line-height: 1.8; }.install-message { margin: 13px 0 0 !important; color: #84cbb0 !important; font-size: 10px !important; }
+  .onboarding-backdrop { background: rgba(1,6,4,.83); }.onboarding-modal { width: min(610px,calc(100vw - 50px)); padding: 30px; }.onboarding-modal>span { color: #5fd7aa; font-size: 9px; font-weight: 750; letter-spacing: .18em; }.onboarding-modal h2 { margin: 8px 0; font-size: 23px; }.onboarding-modal>p { max-width: none; }.onboarding-modal code { color: #80aa9a; }.onboarding-mark { display: grid; width: 52px; height: 52px; margin-bottom: 20px; place-items: center; border: 1px solid #285041; border-radius: 14px; color: #59dba9; background: #10261e; }.install-summary { display: grid; grid-template-columns: repeat(3,1fr); gap: 12px; margin-top: 22px; }.install-summary>div { display: flex; align-items: flex-start; gap: 9px; padding-top: 12px; border-top: 1px solid #20362d; color: #55cfa1; }.install-summary span { display: flex; flex-direction: column; gap: 4px; }.install-summary strong { color: #dcebe5; font-size: 10.5px; }.install-summary small { color: #687e75; font-size: 9px; line-height: 1.4; }.approval-steps { margin: 20px 0 0; padding: 14px 14px 14px 34px; border-top: 1px solid #20362d; border-bottom: 1px solid #20362d; color: #94a79f; font-size: 10.5px; line-height: 1.8; }.install-message { margin: 13px 0 0 !important; color: #84cbb0 !important; font-size: 10px !important; }.settings-install-message { padding-top: 10px; border-top: 1px solid #192b24; }
   @media (max-width: 900px) { .app-shell { grid-template-columns: 190px 1fr; }.content { padding-left: 20px; padding-right: 20px; }.lifecycle-block { width: 100%; margin-left: 0; }.fact-strip { grid-template-columns: repeat(3,1fr); row-gap: 18px; }.fact-strip>div:nth-child(4) { padding-left: 0; border-left: 0; }.activity-layout { grid-template-columns: 1fr; }.traffic-block { padding: 20px 0 0; border-top: 1px solid #1c3028; border-left: 0; }.compact-peer { grid-template-columns: 31px minmax(360px,1fr) minmax(80px,.55fr); }.compact-peer .route-meta { display: none; }.peer-table .table-head,.peer-table .table-row { grid-template-columns: minmax(360px,1fr) minmax(54px,.42fr) minmax(76px,.58fr); }.peer-table .table-head>span:nth-child(3),.peer-table .table-head>span:nth-child(4),.peer-table .table-row>span:nth-child(3),.peer-table .table-row>.address-line { display: none; }.transport-list-head,.transport-row { grid-template-columns: 32px minmax(140px,1fr) minmax(75px,.6fr) minmax(120px,1fr); }.transport-list-head span:nth-child(4),.transport-list-head span:nth-child(5),.transport-row>span:nth-child(5),.transport-row>code:nth-child(6) { display: none; }.settings-layout { grid-template-columns: 156px 1fr; }.settings-nav { padding-right: 12px; }.settings-form { padding-left: 20px; }.developer-connection { grid-template-columns: 1fr; }.application-grid { grid-template-columns: 1fr; } }
 </style>

@@ -46,6 +46,12 @@ number.
 
 ### Fixed
 
+- Made **Disable app management** use an in-app confirmation flow, report its
+  result persistently, and immediately return the UI to monitoring-only mode
+  while leaving the standard FIPS installation and running node unchanged.
+- Kept comment-only `node.identity` and `node.rendezvous` sections
+  round-trippable in the configuration editor instead of serializing them as
+  invalid YAML `null` values.
 - Removed the Developer page from fast local builds while preserving automatic
   detection of normally installed FIPS nodes with non-default socket paths.
 - Corrected packet-loss reporting to use initialized smoothed MMP link

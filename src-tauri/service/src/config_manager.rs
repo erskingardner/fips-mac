@@ -105,6 +105,7 @@ impl ConfigManager {
         let active = self.active_document()?;
         let mut yaml_value: YamlValue = serde_yaml::from_str(&active.raw)
             .map_err(|error| format!("failed to parse active configuration: {error}"))?;
+        normalize_editable_null_sections(&mut yaml_value);
         let secrets = secret_metadata(&yaml_value);
         redact_secrets(&mut yaml_value);
         let yaml = serde_yaml::to_string(&yaml_value)
@@ -459,6 +460,30 @@ fn mapping_at<'a>(root: &'a YamlValue, path: &[&str]) -> Option<&'a Mapping> {
     current.as_mapping()
 }
 
+fn value_at_mut<'a>(root: &'a mut YamlValue, path: &[&str]) -> Option<&'a mut YamlValue> {
+    let mut current = root;
+    for component in path {
+        current = current.as_mapping_mut()?.get_mut(key(component))?;
+    }
+    Some(current)
+}
+
+fn normalize_editable_null_sections(root: &mut YamlValue) {
+    // The shipped operator file keeps these optional sections present with
+    // commented examples beneath them. serde_yaml accepts that source when it
+    // deserializes directly into FIPS Config, but projecting through Value and
+    // serializing turns the empty sections into explicit `null`, which Config
+    // then rejects when the draft is submitted unchanged. Keep the editable
+    // projection round-trippable without adding any effective settings.
+    for path in [["node", "identity"], ["node", "rendezvous"]] {
+        if let Some(value) = value_at_mut(root, &path)
+            && value.is_null()
+        {
+            *value = YamlValue::Mapping(Mapping::new());
+        }
+    }
+}
+
 fn redact_secrets(root: &mut YamlValue) {
     if let Some(identity) = mapping_at_mut(root, &["node", "identity"])
         && identity.contains_key(key("nsec"))
@@ -744,6 +769,25 @@ mod tests {
             .validate(&snapshot.revision, &snapshot.yaml)
             .unwrap();
         assert!(validated.hydrated_yaml.contains("010203"));
+    }
+
+    #[test]
+    fn snapshot_keeps_comment_only_node_sections_round_trippable() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("fips.yaml");
+        let config = "node:\n  identity:\n    # Optional identity settings.\n  rendezvous:\n    # Optional rendezvous settings.\n  control:\n    enabled: true\n    socket_path: /var/run/fips/control.sock\ntun:\n  enabled: false\ndns:\n  enabled: false\npeers: []\n";
+        fs::write(&path, config).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let manager = ConfigManager::new(path, directory.path().join("state"));
+        fs::create_dir(directory.path().join("state")).unwrap();
+        manager.bootstrap(None).unwrap();
+
+        let snapshot = manager.snapshot().unwrap();
+        assert!(snapshot.yaml.contains("identity: {}"));
+        assert!(snapshot.yaml.contains("rendezvous: {}"));
+        manager
+            .validate(&snapshot.revision, &snapshot.yaml)
+            .unwrap();
     }
 
     #[test]

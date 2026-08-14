@@ -442,11 +442,22 @@ pub async fn remove_node_service(
         }
         state.refresh.notify_one();
         Ok(ServiceStatus {
+            available: false,
+            state: "unknown".into(),
+            enabled: false,
+            loaded: false,
+            running: false,
+            controller_version: None,
+            pid: None,
+            last_exit_status: None,
             detail: Some(
                 "FIPS management was disabled. The standard FIPS installation is unchanged.".into(),
             ),
+            ownership: "external".into(),
+            installation: "standard".into(),
+            can_migrate: false,
+            config_path: Some(STANDARD_FIPS_CONFIG.into()),
             registration: registration_status(),
-            ..ServiceStatus::checking()
         })
     }
     #[cfg(not(target_os = "macos"))]
