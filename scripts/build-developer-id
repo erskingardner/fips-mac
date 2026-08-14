@@ -11,6 +11,17 @@ rustup_bin=${commands[rustup]:A:h}
 export PATH="$rustup_bin:$PATH"
 export RUSTUP_TOOLCHAIN=${RUSTUP_TOOLCHAIN:-stable}
 target=${FIPS_MAC_BUILD_TARGET:-universal-apple-darwin}
+app_identity=${APPLE_SIGNING_IDENTITY:-}
+if [[ -z "$app_identity" ]]; then
+  app_identity=$(security find-identity -v -p codesigning 2>/dev/null \
+    | awk -F'"' '/Developer ID Application:.*\(8Z6Q2LZ77W\)/ { print $2; exit }')
+fi
+if [[ -z "$app_identity" ]]; then
+  print -u2 "A Paper Robin Developer ID Application certificate is required for a release build."
+  print -u2 "Import it or set APPLE_SIGNING_IDENTITY explicitly."
+  exit 1
+fi
+export APPLE_SIGNING_IDENTITY="$app_identity"
 installer_identity=${APPLE_INSTALLER_SIGNING_IDENTITY:-}
 if [[ -z "$installer_identity" ]]; then
   installer_identity=$(security find-identity -v -p basic 2>/dev/null \
